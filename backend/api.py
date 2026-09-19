@@ -28,7 +28,7 @@ def permissions(user, db):
         return custom.value[user.role]
     result={}
     for key,config in MODULES.items():
-        write=user.role in ('QA Manager','Product Safety Engineer') or user.role=='IQC' and key in ('xrf-iqc','xrf-plan') or user.role=='OQC' and key in ('xrf-oqc','change-control') or user.role=='Supplier Quality' and key in ('suppliers','fmd','reports','material-declarations')
+        write=user.role in ('QA Manager','Product Safety Engineer') or user.role=='IQC' and key in ('xrf-iqc','xrf-plan') or user.role=='OQC' and key in ('xrf-oqc','change-control') or user.role=='Supplier Quality' and key in ('suppliers','fmd','reports','material-declarations','documents')
         write=write and config['group']!='settings'
         result[key]={a:(True if a=='View' else user.role=='QA Manager' if a in ('Approve','Close','Delete') else write) for a in ACTIONS}
     return result

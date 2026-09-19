@@ -38,11 +38,90 @@ async function boot(overrides={}){
     return {ok:true,status:200,json:async()=>structuredClone(data)};
   };
   const ui=fs.readFileSync(path.join(root,'static/ui.js'),'utf8').replaceAll('export function ','function ');
-  const app=fs.readFileSync(path.join(root,'static/app.js'),'utf8').replace(/^import[^\n]*\n/,'');
-  const code=`(async()=>{${ui}\n${app}\nglobalThis.testApp={render,rowTable,openModal,confirmAction,recordForm};})()`;
+  const app=fs.readFileSync(path.join(root,'static/app.js'),'utf8').replace(/^import[^\n]*\n/,'').replace('(async function init()', 'await (async function init()');
+  const code=`(async()=>{${ui}\n${app}\nglobalThis.testApp={render,rowTable,openModal,confirmAction,recordForm,refreshLivePage};})()`;
   await new vm.Script(code,{filename:'application-ui.js'}).runInContext(dom.getInternalVMContext());
   return {dom,w,async route(route){w.history.replaceState(null,'','/#/'+route);await w.testApp.render();return w.document.querySelector('#content');}};
 }
+
+test('Live refresh reads fresh records, preserves filters and retains data on failure',async()=>{
+  let owner='Before',fail=false,calls=0;
+  const app=await boot({'/api/records':async()=>{calls++;if(fail)throw Error('offline');return {items:[{id:72,module:'organization',data:{department_name:'QA',primary:owner}}],total:1};}});
+  try{
+    const page=await app.route('organization'),doc=app.w.document;
+    assert.equal(doc.querySelector('#topbar-updated').hidden,false);
+    assert.ok(doc.querySelector('#page-refresh-btn'));
+    const before=calls;owner='After';
+    Object.defineProperty(doc,'visibilityState',{configurable:true,value:'visible'});
+    await app.w.testApp.refreshLivePage();
+    assert.ok(calls>before);assert.match(page.textContent,/After/);assert.doesNotMatch(page.textContent,/Before/);
+    const timestamp=doc.querySelector('#topbar-updated time').textContent;
+    fail=true;await app.w.testApp.refreshLivePage(true);
+    assert.match(page.textContent,/After/);
+    assert.equal(doc.querySelector('#topbar-updated time').textContent,timestamp);
+    assert.ok(doc.querySelector('.live-error'));
+    fail=false;
+    page.querySelector('[data-org-view="matrix"]').click();
+    page.querySelector('input[name="q"]').value='After';
+    page.querySelector('#org-search').dispatchEvent(new app.w.Event('submit',{bubbles:true,cancelable:true}));
+    await app.w.testApp.refreshLivePage(true);
+    assert.equal(page.querySelector('input[name="q"]').value,'After');
+    assert.equal(page.querySelector('[data-org-view="matrix"]').getAttribute('aria-pressed'),'true');
+    const search=page.querySelector('input[name="q"]');search.value='draft';search.dispatchEvent(new app.w.Event('input',{bubbles:true}));
+    const blockedCalls=calls;await app.w.testApp.refreshLivePage(true);
+    assert.equal(calls,blockedCalls);assert.equal(search.value,'draft');assert.ok(doc.querySelector('.live-paused'));
+    await app.route('users');assert.equal(doc.querySelector('#topbar-updated').hidden,false);
+    await app.route('system');assert.equal(doc.querySelector('#topbar-updated').hidden,false);
+  }finally{app.dom.window.close();}
+});
+
+test('Live refresh does not overwrite edits started during a request',async()=>{
+  let release,delay=false;
+  const app=await boot({'/api/records':async()=>{if(delay)await new Promise(r=>release=r);return {items:[],total:0};}});
+  try{
+    const page=await app.route('organization');page.querySelector('[data-org-view="matrix"]').click();
+    delay=true;const pending=app.w.testApp.refreshLivePage(true);
+    const input=page.querySelector('input');input.value='unsaved';input.dispatchEvent(new app.w.Event('input',{bubbles:true}));
+    release();await pending;
+    assert.equal(page.querySelector('input'),input);assert.equal(input.value,'unsaved');
+  }finally{app.dom.window.close();}
+});
+
+test('Organization chart derives coverage, filters matrix, and reuses detail and edit',async()=>{
+  const rows=[
+    {id:71,module:'organization',version:1,data:{department_name:'QA',role:'Leader',primary:'Leader',backup:''}},
+    {id:72,module:'organization',version:1,data:{department_name:'System Control (QA)',primary:'Linh / Van',backup:'Leader',responsibility:'Compliance scope',email:'qa@example.test'}},
+    {id:73,module:'organization',version:1,data:{department_name:'New department',primary:'',backup:'Van'}}
+  ];
+  const app=await boot({'/api/records':async()=>({items:rows,total:3}),'/api/records/72':async()=>({...rows[1],display_status:'Pending',related:[]})});
+  try{
+    const page=await app.route('organization'),doc=app.w.document;
+    assert.equal(page.querySelector('[data-org-view="chart"]').getAttribute('aria-pressed'),'true');
+    assert.deepEqual([...page.querySelectorAll('.org-stat strong')].map(e=>e.textContent),['3','3','2','2','2']);
+    assert.equal(page.querySelectorAll('.org-branch').length,2);
+    await page.querySelector('[data-org-open="72"]').onclick();
+    await new Promise(r=>setTimeout(r,5));
+    assert.match(doc.querySelector('.org-drawer').textContent,/Compliance scope/);
+    doc.querySelector('#org-edit').click();
+    assert.equal(doc.querySelector('#record-form [name="primary"]').value,'Linh / Van');
+    doc.querySelector('#modal').close();
+    page.querySelector('[data-org-view="matrix"]').click();
+    assert.equal(page.querySelectorAll('tbody tr').length,3);
+    page.querySelector('[name="status"]').value='Primary not assigned';
+    page.querySelector('#org-search').dispatchEvent(new app.w.Event('submit',{cancelable:true}));
+    assert.equal(page.querySelectorAll('tbody tr').length,1);
+    assert.match(page.querySelector('tbody').textContent,/New department/);
+    assert.ok(page.querySelector('#org-export'));
+    assert.ok(page.querySelector('#org-excel'));
+    page.querySelector('[data-org-view="chart"]').click();
+    assert.equal(page.querySelectorAll('.org-branch').length,2);
+  }finally{app.dom.window.close();}
+});
+
+test('Organization empty state does not fabricate leader or assignments',async()=>{
+  const app=await boot();
+  try{const page=await app.route('organization');assert.equal(page.querySelectorAll('.org-node').length,0);assert.deepEqual([...page.querySelectorAll('.org-stat strong')].map(e=>e.textContent),['0','0','0','0','0']);}finally{app.dom.window.close();}
+});
 
 test('Dashboard renders with no alerts/activity; sidebar has all six groups',async()=>{
   const {dom,w}=await boot();
@@ -121,36 +200,10 @@ test('Unified inspection screens filter, paginate and create original record typ
   }finally{app.dom.window.close();}
 });
 
-test('Organization shows six draft functions and supports saved responsibilities and drawer',async()=>{
-  let rows=[];
-  const row={id:101,module:'organization',version:1,data:{department_name:'Team Lead (QA)',org_unit:'Team Lead (QA)',primary:'QA Owner',responsibility:'Review HSF\nApprove reports'},history:[]};
-  const app=await boot({'/api/records':async()=>({items:rows,total:rows.length,page:1}),'/api/records/101':async()=>row});
-  try{
-    const doc=app.w.document;
-    await app.route('organization');
-    assert.equal(doc.querySelectorAll('.org-unit').length,6);
-    assert.equal(doc.querySelectorAll('[data-org-template]').length,6);
-    doc.querySelector('[data-org-template="0"]').click();
-    assert.match(doc.querySelector('#modal').textContent,/HSF/);
-    assert.match(doc.querySelector('#modal').textContent,/chưa lưu/);
-    doc.querySelector('#org-use-template').click();
-    assert.ok(doc.querySelector('#modal').classList.contains('org-drawer'));
-    assert.equal(doc.querySelector('[name="department_name"]').value,'Team Lead (QA)');
-    assert.match(doc.querySelector('[name="responsibility"]').value,/Phê duyệt danh sách/);
-    doc.querySelector('[data-close]').click();
-    rows=[row];
-    await app.route('organization');
-    assert.equal(doc.querySelectorAll('[data-org-template]').length,5);
-    await doc.querySelector('[data-org-record="101"]').onclick();
-    assert.match(doc.querySelector('#modal').textContent,/QA Owner/);
-    assert.equal(doc.querySelectorAll('.org-duties li').length,2);
-    doc.querySelector('[data-close]').click();
-    await doc.querySelector('[data-org-view="table"]').onclick();
-    assert.match(doc.querySelector('.org-table').textContent,/Review HSF/);
-    assert.equal(doc.querySelector('.org-table tbody tr').children.length,4);
-    await app.route('materials');
-    assert.equal(doc.querySelector('#content').classList.contains('organization-page'),false);
-  }finally{app.dom.window.close();}
+test('Organization loads all pages and escapes imported names without fabricating a leader',async()=>{
+  const requests=[];
+  const app=await boot({'/api/records':async u=>{requests.push(u.searchParams.get('page'));return {items:[{id:Number(u.searchParams.get('page')),data:{department_name:'<img src=x onerror=alert(1)>',primary:'Owner'}}],total:2};}});
+  try{const page=await app.route('organization');assert.deepEqual(requests,['1','2']);assert.equal(page.querySelectorAll('.org-branch').length,2);assert.equal(page.querySelector('.org-node img'),null);assert.ok(page.querySelector('.org-no-leader'));}finally{app.dom.window.close();}
 });
 
 test('Main menus only toggle submenus without navigation or requests',async()=>{

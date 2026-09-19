@@ -1,4 +1,4 @@
-﻿import {esc,label,badge,dateText,timeText,sourceText,percent,empty} from './ui.js?v=7';
+import {esc,label,badge,dateText,timeText,sourceText,percent,empty} from './ui.js?v=7';
 const $=s=>document.querySelector(s);
 const content=$('#content'),modal=$('#modal');
 function getOptimalPageSize(){
@@ -22,13 +22,52 @@ function loginTimeText(value){
   const parts=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(date).map(p=>[p.type,p.value]));
   return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
 }
+const apiCache = new Map();
+const API_CACHE_TTL = 30000;
+let apiCacheGeneration=0;
+
+function invalidateApiCache() {
+  apiCacheGeneration++;
+  apiCache.clear();
+  window.xrfPlanCache = null;
+}
+window.invalidateApiCache = invalidateApiCache;
+
 async function api(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const isGet = method === 'GET';
+
+  if (!isGet) {
+    invalidateApiCache();
+  } else if (!options.noCache) {
+    const cached = apiCache.get(path);
+    if (cached && (Date.now() - cached.time < API_CACHE_TTL)) {
+      return JSON.parse(JSON.stringify(cached.data));
+    }
+  }
+
+  const cacheGeneration=apiCacheGeneration;
   const headers = {
     ...(options.body instanceof FormData ? {} : {'Content-Type': 'application/json'}),
     'X-CSRF-Token': csrf || '',
     ...(options.headers || {})
   };
-  const response = await fetch('/api' + path, { ...options, headers });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeout || 12000);
+
+  let response;
+  try {
+    response = await fetch('/api' + path, { ...options, cache:'no-store', headers, signal: controller.signal });
+  } catch(err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw Error('Kết nối tới máy chủ quá thời gian. Vui lòng kiểm tra lại mạng hoặc tải lại.');
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
+
   if (response.status === 401) {
     location.replace('/login');
     throw Error('Phiên đã hết hạn.');
@@ -48,6 +87,11 @@ async function api(path, options = {}) {
     }
     throw Error(msg);
   }
+
+  if (isGet && cacheGeneration===apiCacheGeneration) {
+    apiCache.set(path, { time: Date.now(), data: data });
+  }
+
   return data;
 }
 function notify(text){clearTimeout(toastTimer);$('#toast').textContent=text;$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,5500);}
@@ -147,28 +191,34 @@ let dashboardElement='pb',dashboardMaterialType='Polymers';
   async function dashboard(){
     const [d,iqc,oqc]=await Promise.all([api('/overview'),api('/xrf-trend?stage=IQC&element='+dashboardElement+'&material_type='+encodeURIComponent(dashboardMaterialType)),api('/xrf-trend?stage=OQC&element='+dashboardElement+'&material_type='+encodeURIComponent(dashboardMaterialType))]);
     overview=d;$('#notification-count').textContent=d.open_actions??0;
+    const coverage = d.coverage || {};
     
-    // Tầng 1: Management KPI (4 cards across full width)
-    const tier1 = `<div class="dashboard-tier tier-1" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;width:100%">
-      <div class="kpi-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 16px;border-left:4px solid #10b981;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.5px;color:#64748b;text-transform:uppercase">HSF COMPLIANCE</div>
-        <div style="font-size:24px;font-weight:750;color:#0f172a;margin:2px 0">${d.hsf_compliance}%</div>
-        <div style="font-size:11px;color:#64748b">${d.compliant_materials} / ${d.active_materials} Compliant</div>
+    // Tầng 1: Management KPI (5 cards across full width - synchronized dimensions & pastel palette)
+    const tier1 = `<div class="dashboard-tier tier-1" style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;width:100%;flex-shrink:0">
+      <div class="kpi-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer;transition:all .15s ease" onclick="location.hash='#/materials'">
+        <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase">TỔNG SỐ VẬT LIỆU</div>
+        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px;line-height:1.1">${d.active_materials}</div>
+        <small style="color:#64748b;font-size:10.5px">Đang quản lý trong hệ thống</small>
       </div>
-      <div class="kpi-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 16px;border-left:4px solid #6366f1;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.5px;color:#64748b;text-transform:uppercase">ACTIVE MATERIALS</div>
-        <div style="font-size:24px;font-weight:750;color:#0f172a;margin:2px 0">${d.active_materials}</div>
-        <div style="font-size:11px;color:#64748b">Vật liệu đang quản lý</div>
+      <div class="kpi-card" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer;transition:all .15s ease" onclick="location.hash='#/materials'">
+        <div style="font-size:11px;font-weight:600;color:#15803d;text-transform:uppercase">TUÂN THỦ HSF</div>
+        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px;line-height:1.1">${d.hsf_compliance}%</div>
+        <small style="color:#15803d;font-size:10.5px">${d.compliant_materials} / ${d.active_materials} Đạt chuẩn RoHS</small>
       </div>
-      <div class="kpi-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 16px;border-left:4px solid #0284c7;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.5px;color:#64748b;text-transform:uppercase">TEST REPORT</div>
-        <div style="font-size:24px;font-weight:750;color:#0f172a;margin:2px 0">${d.valid_reports} / ${d.required_reports}</div>
-        <div style="font-size:11px;color:#64748b">Báo cáo hợp lệ</div>
+      <div class="kpi-card" style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer;transition:all .15s ease" onclick="location.hash='#/xrf-iqc'">
+        <div style="font-size:11px;font-weight:600;color:#b45309;text-transform:uppercase">SÀNG LỌC XRF</div>
+        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px;line-height:1.1">${coverage.xrf} / ${coverage.total_materials}</div>
+        <small style="color:#b45309;font-size:10.5px">NVL đã kiểm tra quang phổ</small>
       </div>
-      <div class="kpi-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 16px;border-left:4px solid #f59e0b;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.5px;color:#64748b;text-transform:uppercase">OPEN ACTIONS</div>
-        <div style="font-size:24px;font-weight:750;color:${d.open_actions>0?'#ef4444':'#0f172a'};margin:2px 0">${d.open_actions}</div>
-        <div style="font-size:11px;color:#64748b">Hành động cần xử lý</div>
+      <div class="kpi-card" style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer;transition:all .15s ease" onclick="location.hash='#/reports'">
+        <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">BÁO CÁO KIỂM NGHIỆM</div>
+        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px;line-height:1.1">${d.valid_reports} / ${d.required_reports}</div>
+        <small style="color:#1e40af;font-size:10.5px">Báo cáo kiểm nghiệm hợp lệ</small>
+      </div>
+      <div class="kpi-card" style="background:${d.open_actions>0?'#fef2f2':'#f8fafc'};border:1px solid ${d.open_actions>0?'#fecaca':'#e2e8f0'};border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer;transition:all .15s ease" onclick="document.getElementById('dashboard-alerts')?.click()">
+        <div style="font-size:11px;font-weight:600;color:${d.open_actions>0?'#b91c1c':'#64748b'};text-transform:uppercase">HÀNH ĐỘNG CẦN XỬ LÝ</div>
+        <div style="font-size:22px;font-weight:700;color:${d.open_actions>0?'#dc2626':'#0f172a'};margin-top:2px;line-height:1.1">${d.open_actions}</div>
+        <small style="color:${d.open_actions>0?'#b91c1c':'#64748b'};font-size:10.5px">${d.open_actions>0?'CAPA, NCR hoặc sự cố phát sinh':'Không có tồn đọng'}</small>
       </div>
     </div>`;
 
@@ -176,7 +226,6 @@ let dashboardElement='pb',dashboardMaterialType='Polymers';
     const tier2 = `<div class="dashboard-tier tier-2" style="width:100%"><section class="card xrf-monitoring-card"><div class="xrf-monitoring-toolbar"><h3><span class="xrf-heading-mark" aria-hidden="true">⌁</span>XRF Monitoring</h3><div class="xrf-monitoring-filters"><label class="xrf-filter"><span>Chất phân tích</span><select id="dashboard-element">${['pb','cd','hg','cr','br','cl'].map(e=>`<option value="${e}" ${e===dashboardElement?'selected':''}>${e.toUpperCase()}</option>`).join('')}</select></label><label class="xrf-filter xrf-filter-material"><span>Nhóm vật liệu</span><select id="dashboard-material-type">${['Polymers','Metals/Ceramic/Glass','Composite','Packaging'].map(t=>`<option ${t===dashboardMaterialType?'selected':''}>${t}</option>`).join('')}</select></label><span class="xrf-period" aria-label="Thời gian hiển thị: 6 tháng gần nhất"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 11h18"/></svg>6 tháng gần nhất</span></div></div><div class="quality-trends" style="display:flex;gap:12px;padding:10px 14px;flex:1;min-height:0">${dashboardTrend('IQC XRF Trend',iqc,'IQC',iqc.control_limit)}${dashboardTrend('OQC XRF Trend',oqc,'OQC',oqc.control_limit)}</div></section></div>`;
     
     // Tầng 3: Risk & Action
-    const coverage = d.coverage;
     const fmdPct = coverage.total_materials ? Math.round(100 * coverage.fmd / coverage.total_materials) : 0;
     const declPct = coverage.total_materials ? Math.round(100 * coverage.declaration / coverage.total_materials) : 0;
     const testPct = d.required_reports ? Math.round(100 * d.valid_reports / d.required_reports) : 100;
@@ -697,8 +746,8 @@ async function suppliersListPage() {
 
   const supplierOptimal = (function() {
     const vh = window.innerHeight || 900;
-    const count = Math.floor((vh - 420) / 39);
-    return Math.max(7, Math.min(18, count)) || 10;
+    const count = Math.floor((vh - 365) / 47);
+    return Math.max(6, Math.min(22, count)) || 8;
   })();
   const pageSize = Number(listState.supplierSize) || supplierOptimal;
   listState.supplierSize = pageSize;
@@ -712,43 +761,32 @@ async function suppliersListPage() {
   const sizeOptHtml = defaultSizes.map(v => `<option value="${v}" ${pageSize===v?'selected':''}>${v===2000?`Tất cả (${total} NCC)`:`${v} / trang`}</option>`).join('');
 
   const kpiCardsHtml = `
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px">
-      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer" data-status-filter="">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;flex-shrink:0">
+      <div style="background:#fff;border:${!stFilter?'2px solid #2563eb':'1px solid #e2e8f0'};border-radius:8px;padding:10px 14px;box-shadow:${!stFilter?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="">
         <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase">Tổng số NCC</div>
-        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px">${projectScopedSuppliers.length}</div>
+        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px;line-height:1.1">${projectScopedSuppliers.length}</div>
         <small style="color:#64748b;font-size:10.5px">${projFilter ? `Dự án: <b>${esc(projFilter)}</b>` : 'Đang quản lý trong hệ thống'}</small>
       </div>
-      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Approved">
+      <div style="background:#f0fdf4;border:${stFilter==='Approved'?'2px solid #16a34a':'1px solid #bbf7d0'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Approved'?'0 0 0 2px rgba(22,163,74,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Approved">
         <div style="font-size:11px;font-weight:600;color:#15803d;text-transform:uppercase">Đạt chuẩn (Approved)</div>
-        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px">${approvedCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px;line-height:1.1">${approvedCount}</div>
         <small style="color:#15803d;font-size:10.5px">Ưu tiên sử dụng sản xuất</small>
       </div>
-      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Qualified">
-        <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">Đủ điều kiện (Qualified)</div>
-        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px">${qualifiedCount}</div>
-        <small style="color:#1e40af;font-size:10.5px">Đạt yêu cầu kỹ thuật & QA</small>
-      </div>
-      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="audit_due">
+      <div style="background:#fffbeb;border:${stFilter==='audit_due'?'2px solid #d97706':'1px solid #fde68a'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='audit_due'?'0 0 0 2px rgba(217,119,6,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="audit_due">
         <div style="font-size:11px;font-weight:600;color:#b45309;text-transform:uppercase">Cần đánh giá (≤ 60 ngày)</div>
-        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px">${auditDueCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px;line-height:1.1">${auditDueCount}</div>
         <small style="color:#b45309;font-size:10.5px">Đến hạn audit định kỳ</small>
       </div>
-      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Blacklist">
+      <div style="background:#eff6ff;border:${stFilter==='Qualified'?'2px solid #2563eb':'1px solid #bfdbfe'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Qualified'?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Qualified">
+        <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">Đủ điều kiện (Qualified)</div>
+        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px;line-height:1.1">${qualifiedCount}</div>
+        <small style="color:#1e40af;font-size:10.5px">Đạt yêu cầu kỹ thuật & QA</small>
+      </div>
+      <div style="background:#fef2f2;border:${stFilter==='Blacklist'?'2px solid #dc2626':'1px solid #fecaca'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Blacklist'?'0 0 0 2px rgba(220,38,38,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Blacklist">
         <div style="font-size:11px;font-weight:600;color:#b91c1c;text-transform:uppercase">Đình chỉ (Blacklist)</div>
-        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px">${blacklistCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px;line-height:1.1">${blacklistCount}</div>
         <small style="color:#b91c1c;font-size:10.5px">Chặn mua hàng & cấp NVL</small>
       </div>
-    </div>
-  `;
-
-  const quickFilterHtml = `
-    <div style="display:flex;gap:6px;margin-bottom:10px;padding:0 2px;flex-wrap:wrap">
-      <button type="button" class="tab-pill ${!stFilter?'active':''}" data-status-filter="" style="border:none;background:${!stFilter?'#2563eb':'#e2e8f0'};color:${!stFilter?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${!stFilter?'600':'500'};cursor:pointer">Tất cả (${projectScopedSuppliers.length})</button>
-      <button type="button" class="tab-pill ${stFilter==='Approved'?'active':''}" data-status-filter="Approved" style="border:none;background:${stFilter==='Approved'?'#16a34a':'#e2e8f0'};color:${stFilter==='Approved'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Approved'?'600':'500'};cursor:pointer">✓ Approved (${approvedCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='Qualified'?'active':''}" data-status-filter="Qualified" style="border:none;background:${stFilter==='Qualified'?'#2563eb':'#e2e8f0'};color:${stFilter==='Qualified'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Qualified'?'600':'500'};cursor:pointer">ℹ️ Qualified (${qualifiedCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='Conditional'?'active':''}" data-status-filter="Conditional" style="border:none;background:${stFilter==='Conditional'?'#d97706':'#e2e8f0'};color:${stFilter==='Conditional'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Conditional'?'600':'500'};cursor:pointer">⚠️ Conditional (${conditionalCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='audit_due'?'active':''}" data-status-filter="audit_due" style="border:none;background:${stFilter==='audit_due'?'#e11d48':'#e2e8f0'};color:${stFilter==='audit_due'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='audit_due'?'600':'500'};cursor:pointer">⏰ Đến hạn đánh giá (${auditDueCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='Blacklist'?'active':''}" data-status-filter="Blacklist" style="border:none;background:${stFilter==='Blacklist'?'#dc2626':'#e2e8f0'};color:${stFilter==='Blacklist'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Blacklist'?'600':'500'};cursor:pointer">🚫 Blacklist (${blacklistCount})</button>
     </div>
   `;
 
@@ -825,7 +863,7 @@ async function suppliersListPage() {
     `;
   }).join('');
 
-  return head('Quản lý Nhà cung cấp & Đánh giá định kỳ', '') + kpiCardsHtml + quickFilterHtml + `
+  return head('Quản lý Nhà cung cấp & Đánh giá định kỳ', '') + kpiCardsHtml + `
     <section class="card fill-card">
       <form class="toolbar" id="filters" data-module="suppliers">
         <input type="search" name="q" placeholder="Tìm tên NCC, NVL cung cấp, liên hệ, email…" value="${esc(listState.q)}" aria-label="Tìm trong bảng">
@@ -1080,8 +1118,8 @@ async function materialsListPage() {
 
   const matOptimal = (function() {
     const vh = window.innerHeight || 900;
-    const count = Math.floor((vh - 350) / 42.5);
-    return Math.max(8, Math.min(30, count)) || 13;
+    const count = Math.floor((vh - 315) / 45);
+    return Math.max(8, Math.min(30, count)) || 10;
   })();
   const pageSize = Number(listState.materialSize) || matOptimal;
   listState.materialSize = pageSize;
@@ -1095,43 +1133,32 @@ async function materialsListPage() {
   const sizeOptHtml = defaultSizes.map(v => `<option value="${v}" ${pageSize===v?'selected':''}>${v===2000?`Tất cả (${total} NVL)`:`${v} / trang`}</option>`).join('');
 
   const kpiCardsHtml = `
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px">
-      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer" data-status-filter="">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;flex-shrink:0">
+      <div style="background:#fff;border:${!stFilter?'2px solid #2563eb':'1px solid #e2e8f0'};border-radius:8px;padding:10px 14px;box-shadow:${!stFilter?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="">
         <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase">Tổng số NVL</div>
-        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px">${projectScopedMaterials.length}</div>
+        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px;line-height:1.1">${projectScopedMaterials.length}</div>
         <small style="color:#64748b;font-size:10.5px">${projFilter ? `Dự án: <b>${esc(projFilter)}</b>` : 'Đang quản lý trong hệ thống'}</small>
       </div>
-      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Compliant">
+      <div style="background:#f0fdf4;border:${stFilter==='Compliant'?'2px solid #16a34a':'1px solid #bbf7d0'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Compliant'?'0 0 0 2px rgba(22,163,74,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Compliant">
         <div style="font-size:11px;font-weight:600;color:#15803d;text-transform:uppercase">Đạt chuẩn (Compliant)</div>
-        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px">${compliantCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px;line-height:1.1">${compliantCount}</div>
         <small style="color:#15803d;font-size:10.5px">100% báo cáo kiểm nghiệm hợp lệ</small>
       </div>
-      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Missing">
+      <div style="background:#fffbeb;border:${stFilter==='Missing'?'2px solid #d97706':'1px solid #fde68a'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Missing'?'0 0 0 2px rgba(217,119,6,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Missing">
         <div style="font-size:11px;font-weight:600;color:#b45309;text-transform:uppercase">Cần nộp / Thiếu báo cáo</div>
-        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px">${missingCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px;line-height:1.1">${missingCount}</div>
         <small style="color:#b45309;font-size:10.5px">Thiếu 1 hoặc nhiều test bắt buộc</small>
       </div>
-      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="ExpiringSoon">
+      <div style="background:#eff6ff;border:${stFilter==='ExpiringSoon'?'2px solid #2563eb':'1px solid #bfdbfe'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='ExpiringSoon'?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="ExpiringSoon">
         <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">Sắp hết hạn (≤ 90 ngày)</div>
-        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px">${expiringSoonCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px;line-height:1.1">${expiringSoonCount}</div>
         <small style="color:#1e40af;font-size:10.5px">Cần yêu cầu NCC gia hạn</small>
       </div>
-      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="ExpiredNG">
+      <div style="background:#fef2f2;border:${stFilter==='ExpiredNG'?'2px solid #dc2626':'1px solid #fecaca'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='ExpiredNG'?'0 0 0 2px rgba(220,38,38,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="ExpiredNG">
         <div style="font-size:11px;font-weight:600;color:#b91c1c;text-transform:uppercase">Quá hạn / Không đạt (NG)</div>
-        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px">${expiredNgCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px;line-height:1.1">${expiredNgCount}</div>
         <small style="color:#b91c1c;font-size:10.5px">Báo cáo quá hạn hoặc kết quả NG</small>
       </div>
-    </div>
-  `;
-
-  const quickFilterHtml = `
-    <div style="display:flex;gap:6px;margin-bottom:10px;padding:0 2px;flex-wrap:wrap">
-      <button type="button" class="tab-pill ${!stFilter?'active':''}" data-status-filter="" style="border:none;background:${!stFilter?'#2563eb':'#e2e8f0'};color:${!stFilter?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${!stFilter?'600':'500'};cursor:pointer">Tất cả (${projectScopedMaterials.length})</button>
-      <button type="button" class="tab-pill ${stFilter==='Compliant'?'active':''}" data-status-filter="Compliant" style="border:none;background:${stFilter==='Compliant'?'#16a34a':'#e2e8f0'};color:${stFilter==='Compliant'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Compliant'?'600':'500'};cursor:pointer">✓ Đạt chuẩn (${compliantCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='Missing'?'active':''}" data-status-filter="Missing" style="border:none;background:${stFilter==='Missing'?'#d97706':'#e2e8f0'};color:${stFilter==='Missing'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Missing'?'600':'500'};cursor:pointer">⏳ Cần nộp báo cáo (${missingCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='ExpiringSoon'?'active':''}" data-status-filter="ExpiringSoon" style="border:none;background:${stFilter==='ExpiringSoon'?'#2563eb':'#e2e8f0'};color:${stFilter==='ExpiringSoon'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='ExpiringSoon'?'600':'500'};cursor:pointer">⚠️ Sắp hết hạn (${expiringSoonCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='ExpiredNG'?'active':''}" data-status-filter="ExpiredNG" style="border:none;background:${stFilter==='ExpiredNG'?'#dc2626':'#e2e8f0'};color:${stFilter==='ExpiredNG'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='ExpiredNG'?'600':'500'};cursor:pointer">🚫 Quá hạn / NG (${expiredNgCount})</button>
-      <button type="button" class="tab-pill ${stFilter==='Active'?'active':''}" data-status-filter="Active" style="border:none;background:${stFilter==='Active'?'#059669':'#e2e8f0'};color:${stFilter==='Active'?'#fff':'#475569'};padding:4px 12px;border-radius:6px;font-size:11.5px;font-weight:${stFilter==='Active'?'600':'500'};cursor:pointer">🟢 Đang sử dụng (${activeCount})</button>
     </div>
   `;
 
@@ -1215,17 +1242,17 @@ async function materialsListPage() {
         </td>
         <td style="padding:6px 10px">${compBadge}</td>
         <td style="padding:6px 10px">${usageBadge}</td>
-        <td style="padding:6px 10px;white-space:nowrap;width:150px;min-width:150px;max-width:none;overflow:visible">
-          <div style="display:flex;align-items:center;gap:6px">
-            <button class="link-button" data-open="${m.id}" style="font-size:11.5px">👁️ Chi tiết</button>
-            <button type="button" class="link-button edit-material-btn" data-material-id="${m.id}" style="font-size:11.5px;color:#2563eb;font-weight:600" title="Chỉnh sửa thông tin NVL & cập nhật báo cáo kiểm nghiệm">✏️ Chỉnh sửa</button>
+        <td style="padding:4px 6px;text-align:center;white-space:nowrap;width:75px">
+          <div style="display:inline-flex;align-items:center;gap:6px">
+            <button class="link-button" data-open="${m.id}" style="font-size:13px;padding:2px 4px;line-height:1;cursor:pointer" title="Xem chi tiết">👁️</button>
+            <button type="button" class="link-button edit-material-btn" data-material-id="${m.id}" style="font-size:13px;color:#2563eb;padding:2px 4px;line-height:1;cursor:pointer" title="Chỉnh sửa">✏️</button>
           </div>
         </td>
       </tr>
     `;
   }).join('');
 
-  return head('Danh mục Nguyên vật liệu & Hồ sơ Tuân thủ', '') + kpiCardsHtml + quickFilterHtml + `
+  return head('Danh mục Nguyên vật liệu & Hồ sơ Tuân thủ', '') + kpiCardsHtml + `
     <section class="card fill-card">
       <form class="toolbar" id="filters" data-module="materials">
         <input type="search" name="q" placeholder="Tìm mã NVL, tên NVL, nhà cung cấp, dự án…" value="${esc(listState.q)}" aria-label="Tìm trong bảng">
@@ -1262,7 +1289,7 @@ async function materialsListPage() {
               <th style="padding:8px 10px;min-width:180px">Hồ sơ Báo cáo kiểm nghiệm</th>
               <th style="padding:8px 10px"><button class="link-button" data-sort="compliance">Trạng thái tuân thủ ${listState.sort==='compliance'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
               <th style="padding:8px 10px"><button class="link-button" data-sort="usage_status">Tình trạng sử dụng ${listState.sort==='usage_status'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
-              <th style="padding:8px 10px;width:170px;min-width:170px;white-space:nowrap">Hành động</th>
+              <th style="padding:6px 4px;width:55px;text-align:center" title="Thao tác / Chỉnh sửa">⚙️</th>
             </tr>
           </thead>
           <tbody>
@@ -1275,12 +1302,492 @@ async function materialsListPage() {
   `;
 }
 
+
+async function xrfDataListPage(module) {
+  const [dataRes, materialsRes, limitsRes, bomRes] = await Promise.all([
+    api(`/records?module=${module}&size=2000`),
+    api('/records?module=materials&size=2000'),
+    api('/xrf-limits'),
+    api('/records?module=bom&size=2000')
+  ]);
+
+  const items = dataRes.items || [];
+  const allMaterials = materialsRes.items || [];
+  const limits = limitsRes || [];
+  const allBom = bomRes?.items || [];
+
+  // Extract unique projects strictly from the "Project" column of BOM module (Quản lý & Cập nhật BOM)
+  const bomProjects = [...new Set(allBom.map(b => (b.data?.project || '').trim()).filter(Boolean))].sort();
+  const bomProjMats = {};
+  allBom.forEach(b => {
+    const p = (b.data?.project || '').trim();
+    const mc = (b.data?.material_code || '').trim();
+    if (p && mc) {
+      if (!bomProjMats[p]) bomProjMats[p] = new Set();
+      bomProjMats[p].add(mc);
+    }
+  });
+
+  // Map limits
+  const limitMap = {};
+  limits.forEach(l => {
+    const d = l.data || {};
+    const mt = (d.material_type || 'Polymers').trim().toLowerCase();
+    const el = (d.element || '').trim();
+    if (!limitMap[mt]) limitMap[mt] = {};
+    limitMap[mt][el] = {
+      control: Number(d.control_limit) || null,
+      spec: Number(d.spec_limit) || null,
+      rule: d.rule || ''
+    };
+  });
+
+  // Map materials by material_code and supplier for cross-reference
+  const matMap = {};
+  allMaterials.forEach(m => {
+    const code = (m.data?.material_code || '').trim();
+    const sup = (m.data?.supplier || '').trim();
+    if (code) {
+      if (!matMap[code]) matMap[code] = [];
+      matMap[code].push(m);
+    }
+  });
+
+  // Collect unique phases and categories
+  const phases = [...new Set(items.map(r => r.data?.phase || r.data?.build).filter(Boolean))].sort();
+  const matTypes = [...new Set(items.map(r => r.data?.material_type).filter(Boolean))].sort();
+
+  // Evaluate compliance for each record
+  items.forEach(r => {
+    const d = r.data || {};
+    const code = (d.material_code || '').trim();
+    const sup = (d.supplier || '').trim();
+    const mt = (d.material_type || 'Polymers').trim().toLowerCase();
+
+    // Check material catalog match
+    const matchingMats = matMap[code] || [];
+    const matMatch = matchingMats.find(m => !sup || (m.data?.supplier || '').trim().toLowerCase() === sup.toLowerCase()) || matchingMats[0];
+    r._matMatch = matMatch;
+    r._hasXrfReq = matMatch ? String(matMatch.data?.required_tests || '').toLowerCase().includes('xrf') : false;
+
+    // Concentrations
+    const pb = Number(d.pb) || 0;
+    const cd = Number(d.cd) || 0;
+    const hg = Number(d.hg) || 0;
+    const cr = Number(d.cr) || 0;
+    const br = Number(d.br) || 0;
+    const cl = Number(d.cl) || 0;
+
+    const explicitRes = String(d.result || r.display_status || '').trim().toUpperCase();
+    
+    let isFail = false;
+    let isWarn = false;
+    const hasData = d.test_date || pb > 0 || cd > 0 || hg > 0 || cr > 0 || br > 0 || cl > 0 || explicitRes;
+
+    if (explicitRes === 'FAIL' || explicitRes === 'NG') {
+      isFail = true;
+    }
+
+    const pbSpec = 1000, pbCtrl = 700;
+    const cdSpec = 100, cdCtrl = 50;
+    const hgSpec = 1000, hgCtrl = 700;
+    const crSpec = 1000, crCtrl = 700;
+    const brSpec = 900, brCtrl = 630;
+    const clSpec = 900, clCtrl = 630;
+
+    if (pb > pbSpec || cd > cdSpec || hg > hgSpec || cr > crSpec || br > brSpec || cl > clSpec) isFail = true;
+    else if (pb > pbCtrl || cd > cdCtrl || hg > hgCtrl || cr > crCtrl || br > brCtrl || cl > clCtrl) isWarn = true;
+
+    if (isFail) {
+      r._status = 'NG';
+    } else if (isWarn) {
+      r._status = 'Warning';
+    } else if (hasData) {
+      r._status = 'Pass';
+    } else {
+      r._status = 'Pending';
+    }
+  });
+
+  const projFilter = listState.project || '';
+  let projectScopedItems = items;
+  if (projFilter) {
+    projectScopedItems = items.filter(r => {
+      const d = r.data || {};
+      const code = (d.material_code || '').trim();
+      const proj = (d.project || '').trim();
+      if (bomProjMats[projFilter] && bomProjMats[projFilter].has(code)) return true;
+      if (proj === projFilter || proj.includes(projFilter)) return true;
+      return false;
+    });
+  }
+
+  // Calculate KPI summary numbers
+  const totalCount = projectScopedItems.length;
+  let passCount = 0;
+  let warningCount = 0;
+  let ngCount = 0;
+  let pendingCount = 0;
+
+  projectScopedItems.forEach(r => {
+    if (r._status === 'Pass') passCount++;
+    else if (r._status === 'Warning') warningCount++;
+    else if (r._status === 'NG') ngCount++;
+    else pendingCount++;
+  });
+
+  // Filtering
+  let filtered = projectScopedItems;
+  const q = (listState.q || '').trim().toLowerCase();
+  const stFilter = listState.status || '';
+  const phaseFilter = listState.phase || '';
+  const catFilter = listState.category || '';
+  const startFilter = listState.start || '';
+  const endFilter = listState.end || '';
+
+  if (q) {
+    filtered = filtered.filter(r => {
+      const d = r.data || {};
+      const code = (d.material_code || '').toLowerCase();
+      const name = (d.material_name || '').toLowerCase();
+      const sup = (d.supplier || '').toLowerCase();
+      const lot = (d.lot || '').toLowerCase();
+      const proj = (d.project || '').toLowerCase();
+      const ph = (d.phase || d.build || '').toLowerCase();
+      const cat = (d.category || d.material_type || '').toLowerCase();
+      return code.includes(q) || name.includes(q) || sup.includes(q) || lot.includes(q) || proj.includes(q) || ph.includes(q) || cat.includes(q);
+    });
+  }
+
+  if (stFilter) {
+    filtered = filtered.filter(r => r._status === stFilter);
+  }
+
+  if (phaseFilter) {
+    filtered = filtered.filter(r => (r.data?.phase === phaseFilter || r.data?.build === phaseFilter));
+  }
+
+  if (catFilter) {
+    filtered = filtered.filter(r => (r.data?.material_type === catFilter || r.data?.category === catFilter));
+  }
+
+  if (startFilter) {
+    filtered = filtered.filter(r => r.data?.test_date && r.data.test_date >= startFilter);
+  }
+  if (endFilter) {
+    filtered = filtered.filter(r => r.data?.test_date && r.data.test_date <= endFilter);
+  }
+
+  // Sorting
+  const sortKey = listState.sort || 'test_date';
+  const sortDir = listState.direction || 'desc';
+  filtered.sort((a, b) => {
+    let valA = a.data?.[sortKey] ?? '';
+    let valB = b.data?.[sortKey] ?? '';
+    if (sortKey === 'status' || sortKey === 'result') {
+      valA = a._status;
+      valB = b._status;
+    }
+    return sortDir === 'asc' ? String(valA).localeCompare(String(valB)) : String(valB).localeCompare(String(valA));
+  });
+
+  // DYNAMIC VIEWPORT HEIGHT FIT - No vertical scroll, fits exactly 1 screen
+  const optimalSize = (function() {
+    const vh = window.innerHeight || 800;
+    // Overhead: topbar(~48) + page padding(~20) + unified KPIs(~74) + margin(~12) + toolbar(~34) + th(~30) + pagination(~38) + buffer = ~315px
+    const count = Math.floor((vh - 315) / 37);
+    return Math.max(6, Math.min(25, count)) || 12;
+  })();
+  const pageSize = optimalSize;
+  listState.xrfSize = pageSize;
+  listState.size = pageSize;
+  const page = listState.page || 1;
+  const total = filtered.length;
+  const pagedItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const pagination = paginationHtml(page, total, pageSize);
+
+  // 2. Unified KPI cards - Synchronized 5-card layout with subtitles
+  const kpiCardsHtml = `
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;flex-shrink:0">
+      <div style="background:#fff;border:${!stFilter?'2px solid #2563eb':'1px solid #e2e8f0'};border-radius:8px;padding:10px 14px;box-shadow:${!stFilter?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="">
+        <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase">Tổng số mẫu</div>
+        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px;line-height:1.1">${totalCount}</div>
+        <small style="color:#64748b;font-size:10.5px">${projFilter ? `Dự án: <b>${esc(projFilter)}</b>` : 'Dữ liệu đo phổ quang học'}</small>
+      </div>
+      <div style="background:#f0fdf4;border:${stFilter==='Pass'?'2px solid #16a34a':'1px solid #bbf7d0'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Pass'?'0 0 0 2px rgba(22,163,74,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Pass">
+        <div style="font-size:11px;font-weight:600;color:#15803d;text-transform:uppercase">Đạt chuẩn (Pass)</div>
+        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px;line-height:1.1">${passCount}</div>
+        <small style="color:#15803d;font-size:10.5px">100% nguyên tố dưới ngưỡng RoHS</small>
+      </div>
+      <div style="background:#fffbeb;border:${stFilter==='Pending'?'2px solid #d97706':'1px solid #fde68a'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Pending'?'0 0 0 2px rgba(217,119,6,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Pending">
+        <div style="font-size:11px;font-weight:600;color:#b45309;text-transform:uppercase">Chờ đo / Xử lý</div>
+        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px;line-height:1.1">${pendingCount}</div>
+        <small style="color:#b45309;font-size:10.5px">Mẫu mới chờ thực hiện XRF</small>
+      </div>
+      <div style="background:#eff6ff;border:${stFilter==='Warning'?'2px solid #2563eb':'1px solid #bfdbfe'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Warning'?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Warning">
+        <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">Cảnh báo ngưỡng</div>
+        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px;line-height:1.1">${warningCount}</div>
+        <small style="color:#1e40af;font-size:10.5px">Nồng độ tiếp cận ngưỡng kiểm soát</small>
+      </div>
+      <div style="background:#fef2f2;border:${stFilter==='NG'?'2px solid #dc2626':'1px solid #fecaca'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='NG'?'0 0 0 2px rgba(220,38,38,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="NG">
+        <div style="font-size:11px;font-weight:600;color:#b91c1c;text-transform:uppercase">Vượt ngưỡng (NG)</div>
+        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px;line-height:1.1">${ngCount}</div>
+        <small style="color:#b91c1c;font-size:10.5px">Hàm lượng vượt giới hạn cho phép</small>
+      </div>
+    </div>
+  `;
+
+  // Helper for concentration badge - compact, clean, no wrapping
+  const renderElem = (el, val, ctrl, spec) => {
+    const num = Number(val) || 0;
+    let color = '#334155';
+    let bg = '#f8fafc';
+    let border = '#e2e8f0';
+    let weight = '500';
+    if (spec && num > spec) {
+      color = '#dc2626'; bg = '#fef2f2'; border = '#fecaca'; weight = '700';
+    } else if (ctrl && num > ctrl) {
+      color = '#d97706'; bg = '#fffbeb'; border = '#fde68a'; weight = '600';
+    }
+    return `<span style="background:${bg};border:1px solid ${border};color:${color};font-weight:${weight};border-radius:2px;padding:0 1.5px;font-size:9px;line-height:1.15;white-space:nowrap">${el}:<b>${esc(val)}</b></span>`;
+  };
+
+  // 4. Build Compact Table Rows - perfectly proportional column widths, 0 scrollbars
+  const rowsHtml = pagedItems.map(r => {
+    const d = r.data || {};
+    const code = d.material_code || '—';
+    const name = d.material_name || '—';
+    const phase = d.phase || d.build || '—';
+    const sup = d.supplier || '—';
+    const lot = d.lot || '—';
+    const matType = d.material_type || 'Polymers';
+    const testDate = d.test_date;
+
+    const pb = d.pb !== undefined && d.pb !== null && d.pb !== '' ? d.pb : '0';
+    const cd = d.cd !== undefined && d.cd !== null && d.cd !== '' ? d.cd : '0';
+    const hg = d.hg !== undefined && d.hg !== null && d.hg !== '' ? d.hg : '0';
+    const cr = d.cr !== undefined && d.cr !== null && d.cr !== '' ? d.cr : '0';
+    const br = d.br !== undefined && d.br !== null && d.br !== '' ? d.br : '0';
+    const cl = d.cl !== undefined && d.cl !== null && d.cl !== '' ? d.cl : '0';
+
+    // Status pill without pseudo-element bullet
+    let statusBadge = '';
+    if (r._status === 'Pass') {
+      statusBadge = `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:600;background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;white-space:nowrap">✓ Pass</span>`;
+    } else if (r._status === 'Warning') {
+      statusBadge = `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:600;background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;white-space:nowrap">⚠️ Cảnh báo</span>`;
+    } else if (r._status === 'NG') {
+      statusBadge = `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:600;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;white-space:nowrap">✕ NG</span>`;
+    } else {
+      statusBadge = `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:600;background:#fffbeb;color:#b45309;border:1px solid #fde68a;white-space:nowrap">⏳ Chờ đo</span>`;
+    }
+
+    // Material catalog indicator: IQC ONLY, completely hidden for OQC
+    let matLinkHtml = '';
+    if (module === 'xrf-iqc') {
+      if (r._matMatch) {
+        if (r._hasXrfReq) {
+          matLinkHtml = `<span style="color:#15803d;font-weight:600" title="Khớp Danh mục NVL & có y/c test XRF">✓ Khớp NVL</span>`;
+        } else {
+          matLinkHtml = `<span style="color:#b45309" title="Khớp mã trong Danh mục NVL nhưng không có y/c XRF">⚠️ Khớp NVL</span>`;
+        }
+      } else {
+        matLinkHtml = `<span style="color:#94a3b8" title="Chưa tìm thấy trong Danh mục NVL">Chưa liên kết</span>`;
+      }
+    }
+
+    return `
+      <tr style="height:35px">
+        <td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(code)}">
+          <div style="display:flex;flex-direction:column;justify-content:center;line-height:1.2;overflow:hidden">
+            <button class="link-button" data-open="${r.id}" style="font-weight:700;font-size:12px;color:#0f172a;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left">${esc(code)}</button>
+            ${module==='xrf-iqc'&&matLinkHtml?`<div style="font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${matLinkHtml}</div>`:''}
+          </div>
+        </td>
+        <td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(name)}">
+          <span style="font-size:12px;font-weight:600;color:#0f172a">${esc(name)}</span>
+        </td>
+        <td style="padding:3px 4px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:700;background:#f1f5f9;color:#0f172a;border:1px solid #cbd5e1;white-space:nowrap">${esc(phase)}</span>
+        </td>
+        <td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(module==='xrf-iqc'?sup:(d.category||'Finish Good'))}">
+          <span style="font-size:11.5px;font-weight:600;color:#1e293b">${esc(module==='xrf-iqc'?sup:(d.category||'Finish Good'))}</span>
+        </td>
+        <td style="padding:3px 4px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(lot)}">
+          <span style="font-family:monospace;font-size:11px;background:#f8fafc;padding:1px 4px;border-radius:3px;border:1px solid #e2e8f0;color:#334155;white-space:nowrap">${esc(lot)}</span>
+        </td>
+        <td style="padding:3px 2px;text-align:center;white-space:nowrap" title="${testDate?new Date(testDate).toLocaleDateString('vi-VN'):''}">
+          <span style="font-size:11px;color:#0f172a">${testDate?new Date(testDate).toLocaleDateString('vi-VN'):'—'}</span>
+        </td>
+        <td style="padding:3px 2px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(matType)}">
+          <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;white-space:nowrap">${esc(matType)}</span>
+        </td>
+        <td style="padding:3px 4px;overflow:hidden;white-space:nowrap">
+          <div style="display:flex;gap:2px;align-items:center;font-size:10px;line-height:1.15;overflow:hidden" title="Pb:${pb}, Cd:${cd}, Hg:${hg}, Cr:${cr}, Br:${br}, Cl:${cl} (ppm)">
+            ${renderElem('Pb', pb, 700, 1000)}
+            ${renderElem('Cd', cd, 50, 100)}
+            ${renderElem('Hg', hg, 700, 1000)}
+            ${renderElem('Cr', cr, 700, 1000)}
+            ${renderElem('Br', br, 630, 900)}
+            ${renderElem('Cl', cl, 630, 900)}
+          </div>
+        </td>
+        <td style="padding:3px 2px;text-align:center;white-space:nowrap">
+          ${statusBadge}
+        </td>
+        <td style="padding:3px 4px;text-align:center;white-space:nowrap">
+          <div style="display:inline-flex;align-items:center;justify-content:center;gap:6px">
+            <button class="link-button" data-open="${r.id}" style="font-size:13px;padding:2px 4px;line-height:1;cursor:pointer" title="Xem chi tiết">👁️</button>
+            <button type="button" class="link-button edit-xrf-btn" data-record-id="${r.id}" data-record-module="${module}" style="font-size:13px;color:#2563eb;padding:2px 4px;line-height:1;cursor:pointer" title="Chỉnh sửa">✏️</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div style="display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden">
+      ${kpiCardsHtml}
+      <section class="card fill-card" style="display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;margin-bottom:0">
+        <form class="toolbar" id="filters" data-module="${module}" style="padding:4px 8px;gap:5px;flex-shrink:0;margin-bottom:0;flex-wrap:nowrap;overflow:hidden">
+          <input type="search" name="q" placeholder="Tìm kiếm..." value="${esc(listState.q)}" aria-label="Tìm trong bảng" style="min-width:85px;max-width:125px;padding:3px 6px;font-size:11.5px">
+          <select name="phase" id="phase-filter" title="Giai đoạn" aria-label="Giai đoạn" style="max-width:115px;padding:3px 5px;font-size:11.5px">
+            <option value="">Tất cả giai đoạn (${phases.length})</option>
+            ${phases.map(p => `<option value="${esc(p)}" ${phaseFilter===p?'selected':''}>${esc(p)}</option>`).join('')}
+          </select>
+          <select name="project" id="project-filter" title="Lọc theo Dự án" aria-label="Dự án" style="max-width:125px;padding:3px 5px;font-size:11.5px">
+            <option value="">Tất cả dự án (${bomProjects.length})</option>
+            ${bomProjects.map(p => `<option value="${esc(p)}" ${projFilter===p?'selected':''}>Dự án: ${esc(p)}</option>`).join('')}
+          </select>
+          <select name="category" id="category-filter" title="Nhóm vật liệu" aria-label="Nhóm vật liệu" style="max-width:105px;padding:3px 5px;font-size:11.5px">
+            <option value="">Tất cả nhóm</option>
+            <option value="Polymers" ${catFilter==='Polymers'?'selected':''}>Polymers</option>
+            <option value="Metals/Ceramic/Glass" ${catFilter==='Metals/Ceramic/Glass'?'selected':''}>Metals/Ceramic</option>
+            <option value="Composite" ${catFilter==='Composite'?'selected':''}>Composite</option>
+            <option value="Packaging" ${catFilter==='Packaging'?'selected':''}>Packaging</option>
+          </select>
+          <select name="status" id="status-filter" title="Trạng thái" aria-label="Trạng thái" style="max-width:105px;padding:3px 5px;font-size:11.5px">
+            <option value="">Tất cả trạng thái</option>
+            <option value="Pass" ${stFilter==='Pass'?'selected':''}>✓ Pass</option>
+            <option value="Warning" ${stFilter==='Warning'?'selected':''}>⚠️ Cảnh báo</option>
+            <option value="NG" ${stFilter==='NG'?'selected':''}>✕ NG</option>
+            <option value="Pending" ${stFilter==='Pending'?'selected':''}>⏳ Chờ đo</option>
+          </select>
+          <label style="margin:0;display:flex;align-items:center;gap:2px;font-size:10.5px;color:var(--muted)">Từ<input type="date" name="start" value="${esc(listState.start)}" style="width:96px;padding:2px 3px;font-size:10.5px"></label>
+          <label style="margin:0;display:flex;align-items:center;gap:2px;font-size:10.5px;color:var(--muted)">Đến<input type="date" name="end" value="${esc(listState.end)}" style="width:96px;padding:2px 3px;font-size:10.5px"></label>
+          <div class="toolbar-actions-group">
+            <button type="submit" class="toolbar-btn" style="padding:2px 6px" title="Tìm"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
+            <button type="button" id="reset-filter" class="toolbar-btn" style="padding:2px 6px" title="Làm mới"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg></button>
+          </div>
+          <div class="toolbar-actions-right">
+            <button type="button" id="export" class="toolbar-btn" data-module="${module}" style="padding:2px 6px" title="Xuất Excel"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+            ${can(module,'Create')?`<button type="button" class="primary toolbar-btn" id="add-record" data-module="${module}" style="padding:2px 7px" title="Thêm mới"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`:''}
+          </div>
+        </form>
+        <div class="table-scroll" style="flex:1;min-height:0;overflow-y:hidden!important;overflow-x:hidden!important">
+          <table style="width:100%;table-layout:fixed;border-collapse:collapse">
+            <thead style="background:#f8fafc">
+              <tr>
+                <th style="padding:5px 6px;width:11.5%;text-align:left"><button class="link-button" data-sort="material_code">Part Code ${listState.sort==='material_code'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 6px;width:14.5%;text-align:left"><button class="link-button" data-sort="material_name">Part Name ${listState.sort==='material_name'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 4px;width:6%;text-align:center"><button class="link-button" data-sort="phase">Giai đoạn ${listState.sort==='phase'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 6px;width:9.5%;text-align:left"><button class="link-button" data-sort="supplier">${module==='xrf-iqc'?'Nhà cung cấp':'Phân loại'} ${listState.sort==='supplier'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 4px;width:8.5%;text-align:center"><button class="link-button" data-sort="lot">Lot No. ${listState.sort==='lot'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 2px;width:8.5%;text-align:center"><button class="link-button" data-sort="test_date">Ngày test ${listState.sort==='test_date'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 2px;width:8%;text-align:center"><button class="link-button" data-sort="material_type">Nhóm VL ${listState.sort==='material_type'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 4px;width:17.5%;text-align:left">Chỉ số XRF đo (ppm)</th>
+                <th style="padding:5px 2px;width:7%;text-align:center"><button class="link-button" data-sort="result">Đánh giá ${listState.sort==='result'?(listState.direction==='asc'?'↑':'↓'):'↕'}</button></th>
+                <th style="padding:5px 4px;width:9%;text-align:center" title="Thao tác / Chỉnh sửa">⚙️</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || '<tr><td colspan="10" class="muted" style="text-align:center;padding:20px">Không tìm thấy kết quả kiểm nghiệm nào phù hợp.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div style="flex-shrink:0">
+          ${pagination}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+// Organization presentation uses the existing record API and editing workflow.
+let orgView='chart', orgRows=[], orgQuery='', orgStatus='';
+const orgAssigned=value=>!!String(value??'').trim()&&!/^(?:-|—|n\/a|tbd|chưa phân công)$/i.test(String(value).trim());
+const orgAssignment=d=>!orgAssigned(d.primary)?'Primary not assigned':!orgAssigned(d.backup)?'Backup not assigned':'Fully assigned';
+const orgLeader=r=>!r.data.reports_to&&/leader|team lead|overall coordinator/i.test(`${r.data.role||''} ${r.data.org_unit||''}`);
+const orgTone=r=>{const name=r.data.department_name||'';return /system|^qa$/i.test(name)?0:/iqc|oqc/i.test(name)?1:/production|ops/i.test(name)?2:/supply|purchase|pmc/i.test(name)?3:/red|npi/i.test(name)?4:[...name].reduce((a,c)=>a+c.charCodeAt(0),0)%6;};
+const orgPill=d=>`<span class="org-pill ${orgAssignment(d)==='Fully assigned'?'complete':'pending'}">${esc(orgAssignment(d))}</span>`;
+function orgMetrics(rows){
+  const members=new Set(rows.flatMap(r=>[r.data.primary,r.data.backup].filter(orgAssigned).flatMap(v=>String(v).split(/[/;,\n]+/)).map(v=>v.trim().toLocaleLowerCase()).filter(Boolean)));
+  return [new Set(rows.map(r=>String(r.data.department_name||'').trim().toLocaleLowerCase()).filter(Boolean)).size,members.size,rows.filter(r=>orgAssigned(r.data.primary)).length,rows.filter(r=>orgAssigned(r.data.backup)).length,rows.filter(r=>orgAssignment(r.data)!=='Fully assigned').length];
+}
+async function organizationPage(){
+  const rows=[];
+  for(let page=1;;page++){
+    const result=await api(`/records?module=organization&size=2000&page=${page}&sort=department_name&direction=asc`);
+    rows.push(...result.items);
+    if(rows.length>=result.total||!result.items.length)break;
+  }
+  orgRows=rows;
+  return organizationHTML();
+}
+function orgCard(r,leader=false){const d=r.data;return `<button type="button" class="org-node org-tone-${orgTone(r)} ${leader?'org-leader':''}" data-org-open="${r.id}" aria-label="Xem chi tiết ${esc(d.department_name)}">
+  <div class="org-node-head"><h3>${esc(leader?'QA / HSF Leader':d.department_name||'Chưa đặt tên')}</h3><span class="org-arrow" aria-hidden="true">↗</span></div>
+  <div class="org-node-body"><strong class="org-primary">${esc(orgAssigned(d.primary)?d.primary:'Chưa có Primary DRI')}</strong>${leader?`<small class="org-coordinator">${esc(d.role||'Leader')} · Overall Coordinator</small>`:''}<div class="org-backup ${orgAssigned(d.backup)?'assigned':'missing'}"><span>Backup</span><span>${esc(orgAssigned(d.backup)?d.backup:'Chưa phân công')}</span></div></div></button>`;}
+function orgFiltered(){return orgRows.filter(r=>(!orgQuery||Object.values(r.data).some(v=>String(v??'').toLocaleLowerCase().includes(orgQuery.toLocaleLowerCase())))&&(!orgStatus||orgAssignment(r.data)===orgStatus));}
+function organizationHTML(){
+  const metrics=orgMetrics(orgRows), rows=orgFiltered(), leaders=orgRows.filter(orgLeader), departments=rows.filter(r=>!orgLeader(r));
+  return `<div class="org-dashboard"><div class="org-summary" aria-label="Tổng quan phân công">${['Departments','Members','Primary DRI','Backup','Pending'].map((title,i)=>`<div class="org-stat org-tone-${i}" title="${['Số đơn vị, gồm Leader','Số người phụ trách và backup','Hồ sơ có Primary DRI','Hồ sơ có backup','Hồ sơ thiếu Primary hoặc Backup'][i]}"><strong>${metrics[i]}</strong><span>${title}</span></div>`).join('')}</div>
+  <section class="org-surface"><div class="org-controls"><div class="org-tabs" role="group" aria-label="Chế độ xem"><button data-org-view="chart" aria-pressed="${orgView==='chart'}">Organization Chart</button><button data-org-view="matrix" aria-pressed="${orgView==='matrix'}">Responsibility Matrix</button></div><div class="org-actions">${orgView==='matrix'?'<button id="org-export">Export CSV (filtered)</button><button id="org-excel">Excel · all records</button>':''}${can('organization','Create')?'<button class="primary" id="org-add">+ Add new</button>':''}</div></div>
+  ${orgView==='matrix'?`<form class="org-search" id="org-search"><input name="q" type="search" aria-label="Tìm bộ phận hoặc người phụ trách" placeholder="Tìm bộ phận, người phụ trách, trách nhiệm…" value="${esc(orgQuery)}">${orgView==='matrix'?`<select name="status" aria-label="Trạng thái phân công"><option value="">Tất cả trạng thái phân công</option>${['Fully assigned','Primary not assigned','Backup not assigned'].map(s=>`<option ${s===orgStatus?'selected':''}>${s}</option>`).join('')}</select>`:''}<button>Tìm kiếm</button>${orgQuery||orgStatus?'<button type="button" id="org-reset">Xóa lọc</button>':''}<span>${rows.length} / ${orgRows.length} hồ sơ</span></form>`:''}
+  ${!orgRows.length?empty('Chưa có cơ cấu trách nhiệm','Thêm hồ sơ để phân công Primary DRI và Backup cho từng bộ phận.'):orgView==='chart'?`<div class="org-chart"><div class="org-leaders">${leaders.length?leaders.map(r=>orgCard(r,true)).join(''):'<div class="org-no-leader">QA / HSF Leader<br><small>Chưa có hồ sơ điều phối tổng thể</small></div>'}</div><div class="org-chart-label" aria-hidden="true"></div><div class="org-branches">${departments.map(r=>`<div class="org-branch">${orgCard(r)}</div>`).join('')}</div>${!departments.length?empty('Không có bộ phận phù hợp','Thay đổi tìm kiếm hoặc thêm bộ phận mới.'):''}</div>`:`<div class="table-scroll org-matrix"><table><thead><tr>${['Department','Scope / Responsibility','Primary DRI','Backup DRI','Status','Action'].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr><td><button class="link-button" data-org-open="${r.id}">${esc(r.data.department_name)}</button><small>${esc(r.data.role||'—')}</small></td><td><div class="org-matrix-scope">${esc(r.data.responsibility||'Chưa cập nhật')}</div></td><td><b>${esc(r.data.primary||'Chưa phân công')}</b><small>${esc(r.data.email||'')}</small></td><td>${esc(r.data.backup||'Chưa phân công')}</td><td>${orgPill(r.data)}<small>Hồ sơ: ${esc(r.display_status||r.data.status||'—')}</small></td><td><button class="link-button" data-org-open="${r.id}">Chi tiết →</button></td></tr>`).join('')}</tbody></table>${!rows.length?empty('Không có kết quả','Thử thay đổi bộ lọc.'):''}</div>`}</section></div>`;
+}
+function bindOrganization(){
+  const repaint=()=>{content.innerHTML=organizationHTML();bindOrganization();};
+  content.querySelectorAll('[data-org-view]').forEach(b=>b.onclick=()=>{orgView=b.dataset.orgView;orgStatus='';if(orgView==='chart')orgQuery='';repaint();});
+  content.querySelectorAll('[data-org-open]').forEach(b=>b.onclick=()=>openOrganizationDetail(b.dataset.orgOpen));
+  if($('#org-search')) $('#org-search').onsubmit=e=>{e.preventDefault();const form=new FormData(e.target);orgQuery=String(form.get('q')||'').trim();orgStatus=String(form.get('status')||'');repaint();};
+  $('#org-reset')?.addEventListener('click',()=>{orgQuery='';orgStatus='';repaint();});
+  $('#org-add')?.addEventListener('click',()=>recordForm('organization'));
+  $('#org-excel')?.addEventListener('click',()=>{location.href='/api/export/organization';});
+  $('#org-export')?.addEventListener('click',()=>{
+    const cell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replaceAll('"','""')+'"';
+    const rows=[['Department','Scope / Responsibility','Primary DRI','Backup DRI','Email','Role','Assignment Status','Record Status'],...orgFiltered().map(r=>[r.data.department_name,r.data.responsibility,r.data.primary,r.data.backup,r.data.email,r.data.role,orgAssignment(r.data),r.display_status])];
+    const url=URL.createObjectURL(new Blob(['\ufeff'+rows.map(r=>r.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='responsibility-matrix.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  });
+}
+async function openOrganizationDetail(id){
+  const trigger=document.activeElement;
+  const drawer=document.createElement('dialog');drawer.className='org-drawer';drawer.setAttribute('aria-label','Responsibility details');
+  drawer.innerHTML='<button class="org-close" aria-label="Đóng chi tiết">×</button><p role="status">Đang tải trách nhiệm…</p>';document.body.append(drawer);
+  drawer.querySelector('.org-close').onclick=()=>drawer.close();
+  drawer.addEventListener('close',()=>{drawer.remove();if(trigger?.isConnected)trigger.focus();});
+  drawer.addEventListener('click',e=>{if(e.target===drawer){const r=drawer.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right)drawer.close();}});
+  drawer.showModal();
+  try{
+    const row=await api('/records/'+encodeURIComponent(id));if(!drawer.open)return;const d=row.data;
+    const fields=[['Primary DRI',d.primary],['Backup DRI',d.backup],['Role',d.role],['Email / Contact',d.email||d.contact],['Responsibility scope',d.responsibility],['Related compliance responsibilities',d.related_responsibilities||d.compliance_responsibilities||d.authority],['Reports to',d.reports_to],['Nguồn trách nhiệm',d.source_reference],['Trạng thái hồ sơ',row.display_status]];
+    drawer.innerHTML=`<header><span class="org-eyebrow">RESPONSIBILITY DETAILS</span><button class="org-close" aria-label="Đóng chi tiết">×</button><h2>${esc(d.department_name||'Department')}</h2>${orgPill(d)}</header><dl>${fields.map(([k,v])=>`<div><dt>${k}</dt><dd>${esc(v||'Chưa cập nhật')}</dd></div>`).join('')}</dl><footer>${can('organization','Edit')?'<button class="primary" id="org-edit">Edit responsibility</button>':''}<button id="org-full-detail">Hồ sơ & audit history →</button></footer>`;
+    drawer.querySelector('.org-close').onclick=()=>drawer.close();
+    drawer.querySelector('#org-edit')?.addEventListener('click',()=>{drawer.close();recordForm('organization',row);});
+    drawer.querySelector('#org-full-detail').onclick=()=>{drawer.close();goto('record/'+row.id);};
+    drawer.querySelector('.org-close').focus();
+  }catch(error){drawer.querySelector('[role="status"]').textContent=error.message;}
+}
+
 async function listPage(module){
+  if(module==='organization') return organizationPage();
   if(module==='materials') {
     return await materialsListPage();
   }
   if(module==='suppliers') {
     return await suppliersListPage();
+  }
+  if(module==='xrf-iqc' || module==='xrf-oqc') {
+    return await xrfDataListPage(module);
   }
   if(module==='test-plan') {
     return await finishedGoodsTestPlanPage();
@@ -1440,30 +1947,30 @@ async function finishedGoodsTestPlanPage() {
   const pagination = paginationHtml(page, total, pageSize);
 
   const kpiCardsHtml = `
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px">
-      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:pointer" data-status-filter="">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;flex-shrink:0">
+      <div style="background:#fff;border:${!stFilter?'2px solid #2563eb':'1px solid #e2e8f0'};border-radius:8px;padding:10px 14px;box-shadow:${!stFilter?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="">
         <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase">Tổng số báo cáo</div>
-        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px">${items.length}</div>
+        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px;line-height:1.1">${items.length}</div>
         <small style="color:#64748b;font-size:10.5px">Kế hoạch test thành phẩm</small>
       </div>
-      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Pass">
+      <div style="background:#f0fdf4;border:${stFilter==='Pass'?'2px solid #16a34a':'1px solid #bbf7d0'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Pass'?'0 0 0 2px rgba(22,163,74,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Pass">
         <div style="font-size:11px;font-weight:600;color:#15803d;text-transform:uppercase">Đạt / Pass</div>
-        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px">${passCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px;line-height:1.1">${passCount}</div>
         <small style="color:#15803d;font-size:10.5px">Hoàn thành & kết quả Pass</small>
       </div>
-      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="Pending">
+      <div style="background:#fffbeb;border:${stFilter==='Pending'?'2px solid #d97706':'1px solid #fde68a'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='Pending'?'0 0 0 2px rgba(217,119,6,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="Pending">
         <div style="font-size:11px;font-weight:600;color:#b45309;text-transform:uppercase">Đang xử lý / Pending</div>
-        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px">${pendingCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px;line-height:1.1">${pendingCount}</div>
         <small style="color:#b45309;font-size:10.5px">Chưa có kết quả báo cáo</small>
       </div>
-      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="DueSoon">
+      <div style="background:#eff6ff;border:${stFilter==='DueSoon'?'2px solid #2563eb':'1px solid #bfdbfe'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='DueSoon'?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="DueSoon">
         <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">Gần đến hạn (≤ 14 ngày)</div>
-        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px">${dueSoonCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px;line-height:1.1">${dueSoonCount}</div>
         <small style="color:#1e40af;font-size:10.5px">Cần đôn đốc kết quả</small>
       </div>
-      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;cursor:pointer" data-status-filter="NG">
+      <div style="background:#fef2f2;border:${stFilter==='NG'?'2px solid #dc2626':'1px solid #fecaca'};border-radius:8px;padding:10px 14px;box-shadow:${stFilter==='NG'?'0 0 0 2px rgba(220,38,38,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease" data-status-filter="NG">
         <div style="font-size:11px;font-weight:600;color:#b91c1c;text-transform:uppercase">Quá hạn / NG / Fail</div>
-        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px">${ngCount}</div>
+        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px;line-height:1.1">${ngCount}</div>
         <small style="color:#b91c1c;font-size:10.5px">Không đạt hoặc trễ hạn</small>
       </div>
     </div>
@@ -1535,6 +2042,1223 @@ async function finishedGoodsTestPlanPage() {
   </section>`;
 }
 
+
+
+window.xrfPlanState = window.xrfPlanState || {
+  year: 2026,
+  tab: 'matrix',
+  project: '',
+  category: '',
+  status: '',
+  q: '',
+  page: 1,
+  size: 15
+};
+window.xrfCellDetailStore = {};
+window.xrfPlanCurrentItems = [];
+window.xrfPlanCache = null;
+
+function renderXrfFrequencyRulesTable() {
+  return `
+    <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:12px 0">
+      <div style="margin-bottom:14px">
+        <h3 style="margin:0 0 4px 0;color:#0f172a;font-size:15px;display:flex;align-items:center;gap:8px">
+          <span>⚙️ Quy chuẩn Tần suất Kiểm tra XRF (Test Frequency Standards)</span>
+        </h3>
+        <p style="margin:0;color:#64748b;font-size:12px">Bảng quy định tần suất kiểm tra áp dụng cho toàn bộ chu trình NPI và Sản xuất hàng loạt (MP) theo tiêu chuẩn Product Safety.</p>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#f8fafc;border-bottom:2px solid #cbd5e1">
+            <th style="padding:10px;text-align:center;width:45px">No</th>
+            <th style="padding:10px;text-align:left;width:130px">Test</th>
+            <th style="padding:10px;text-align:left;width:180px">Category</th>
+            <th style="padding:10px;text-align:left;width:160px">NPI Phase</th>
+            <th style="padding:10px;text-align:left;width:150px">MP phase</th>
+            <th style="padding:10px;text-align:left">Hướng dẫn & Tiêu chí kiểm soát</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #e2e8f0">
+            <td style="padding:12px 10px;text-align:center;font-weight:700">1</td>
+            <td style="padding:12px 10px;font-weight:600;color:#1e40af">XRF Test-IQC</td>
+            <td style="padding:12px 10px">
+              <span class="badge info" style="background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:650">Direct Material</span>
+              <div style="color:#64748b;font-size:11px;margin-top:2px">(Raw material)</div>
+            </td>
+            <td style="padding:12px 10px;font-weight:600;color:#334155">Once per NPI stage</td>
+            <td style="padding:12px 10px;font-weight:700;color:#15803d">Monthly (Hàng tháng)</td>
+            <td style="padding:12px 10px;color:#475569;font-size:12px;line-height:1.5">
+              Kiểm soát toàn bộ vật liệu trực tiếp cấu thành linh kiện/sản phẩm (kim loại, nhựa, bo mạch, ốc vít...). Hàng tháng IQC bắt buộc lấy mẫu đo quang phổ huỳnh quang tia X (XRF) để sàng lọc Pb, Cd, Hg, Cr, Br, Cl.
+            </td>
+          </tr>
+          <tr style="border-bottom:1px solid #e2e8f0">
+            <td style="padding:12px 10px;text-align:center;font-weight:700">2</td>
+            <td style="padding:12px 10px;font-weight:600;color:#1e40af">XRF Test-IQC</td>
+            <td style="padding:12px 10px">
+              <span class="badge" style="background:#f1f5f9;color:#475569;font-size:11px;font-weight:650">Indirect Material</span>
+              <div style="color:#64748b;font-size:11px;margin-top:2px">(Packing material)</div>
+            </td>
+            <td style="padding:12px 10px;font-weight:600;color:#334155">1st lot only (Chỉ lô đầu)</td>
+            <td style="padding:12px 10px;font-weight:600;color:#94a3b8">N/A (Không định kỳ)</td>
+            <td style="padding:12px 10px;color:#475569;font-size:12px;line-height:1.5">
+              Vật liệu đóng gói bao bì, túi PE, thùng carton, khay tray, băng keo. Chỉ kiểm tra kiểm định XRF cho lô hàng đầu tiên (1st lot) khi duyệt NCC hoặc thay đổi quy cách sản phẩm; các tháng sản xuất MP không bắt buộc đo lại trừ khi có cảnh báo chất lượng.
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:12px 10px;text-align:center;font-weight:700">3</td>
+            <td style="padding:12px 10px;font-weight:600;color:#7c3aed">XRF Test-OQC</td>
+            <td style="padding:12px 10px">
+              <span class="badge good" style="background:#dcfce7;color:#15803d;font-size:11px;font-weight:650">Finish Good</span>
+              <div style="color:#64748b;font-size:11px;margin-top:2px">(Thành phẩm xuất xưởng)</div>
+            </td>
+            <td style="padding:12px 10px;font-weight:600;color:#334155">Twice per NPI stage</td>
+            <td style="padding:12px 10px;font-weight:700;color:#0284c7">Quarterly (Mỗi quý: T3, T6, T9, T12)</td>
+            <td style="padding:12px 10px;color:#475569;font-size:12px;line-height:1.5">
+              Kiểm tra thành phẩm hoàn chỉnh tại công đoạn xuất xưởng (OQC) định kỳ 3 tháng 1 lần vào các tháng cuối quý để xác nhận 100% sản phẩm đóng gói xuất xưởng an toàn tuyệt đối, tuân thủ nghiêm ngặt chỉ thị RoHS và Halogen-Free.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function saveCarryOverDeclaration(item, ym, planType, inheritedLot, inheritedTestDate, notes) {
+  try {
+    const data = {
+      material_code: item.code,
+      material_name: item.name,
+      year_month: ym,
+      plan_type: planType,
+      inherited_lot: inheritedLot || '',
+      inherited_test_date: inheritedTestDate || '',
+      declared_by: (window.currentUser && window.currentUser.email) || 'IQC / QA',
+      category: item.rawCategory || '',
+      notes: notes || (planType === 'carry_over' ? 'Không phát sinh lô mới. Đang dùng tiếp lô cũ đã test Đạt.' : 'Tháng không phát sinh nhập lô mới.')
+    };
+    await api('/records', {
+      method: 'POST',
+      body: JSON.stringify({ module: 'xrf-plan', data: data })
+    });
+    window.xrfPlanCache = null;
+    modal.close();
+    notify(`Đã lưu khai báo ${planType === 'carry_over' ? 'dùng tiếp lô cũ' : 'miễn test'} cho tháng ${ym}!`);
+    render();
+  } catch (err) {
+    alert('Lỗi lưu khai báo: ' + err.message);
+  }
+}
+
+async function deleteCarryOverDeclaration(declId, ym, declVersion = 1) {
+  if (!confirm(`Bạn có chắc muốn hủy khai báo tháng ${ym} này không?`)) return;
+  try {
+    await api('/records/' + declId + '?version=' + (declVersion || 1), { method: 'DELETE' });
+    window.xrfPlanCache = null;
+    modal.close();
+    notify(`Đã hủy khai báo tháng ${ym}.`);
+    render();
+  } catch (err) {
+    alert('Lỗi hủy khai báo: ' + err.message);
+  }
+}
+
+function openXrfCellDetailModal(cellInfo) {
+  const { item, ym, month, status, tests, decl, latestPassLot } = cellInfo;
+
+  if (status === 'TESTED') {
+    const rows = tests.map(t => {
+      const d = t.data || {};
+      const res = d.result || 'Pass';
+      const isPass = res.toLowerCase() === 'pass';
+      return `
+        <tr style="border-bottom:1px solid #e2e8f0">
+          <td style="padding:7px 8px;font-weight:600;color:#0f172a">${esc(d.test_date || ym)}</td>
+          <td style="padding:7px 8px;font-weight:600">${esc(d.lot || '—')}</td>
+          <td style="padding:7px 8px;text-align:right">${d.pb !== undefined && d.pb !== '' ? d.pb : '—'}</td>
+          <td style="padding:7px 8px;text-align:right">${d.cd !== undefined && d.cd !== '' ? d.cd : '—'}</td>
+          <td style="padding:7px 8px;text-align:right">${d.hg !== undefined && d.hg !== '' ? d.hg : '—'}</td>
+          <td style="padding:7px 8px;text-align:right">${d.cr !== undefined && d.cr !== '' ? d.cr : '—'}</td>
+          <td style="padding:7px 8px;text-align:right">${d.br !== undefined && d.br !== '' ? d.br : '—'}</td>
+          <td style="padding:7px 8px;text-align:right">${d.cl !== undefined && d.cl !== '' ? d.cl : '—'}</td>
+          <td style="padding:7px 8px;text-align:center"><span class="badge ${isPass?'good':'bad'}" style="font-size:10px">${esc(res)}</span></td>
+          <td style="padding:7px 8px;text-align:center">
+            <button type="button" class="link-button" data-open="${t.id}" style="color:#2563eb;font-weight:600;font-size:11px">Xem chi tiết →</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const modalBody = `
+      <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;background:#f8fafc;padding:10px 14px;border-radius:6px;border:1px solid #e2e8f0">
+        <div style="font-size:12px;color:#334155;line-height:1.5">
+          <b>Mã Part:</b> <span style="font-weight:700;color:#0f172a">${esc(item.code)}</span> &nbsp;|&nbsp;
+          <b>Tên:</b> ${esc(item.name)}<br>
+          <b>Công đoạn:</b> ${esc(item.testStage)} &nbsp;|&nbsp;
+          <b>Phân loại:</b> ${esc(item.normalizedCategory)} &nbsp;|&nbsp;
+          <b>Nhà cung cấp:</b> ${esc(item.supplier)}
+        </div>
+        <span class="badge good" style="font-size:11px;padding:4px 8px">✓ ${tests.length} bản ghi đo</span>
+      </div>
+      <div class="table-scroll" style="max-height:55vh">
+        <table style="width:100%;font-size:11.5px;border-collapse:collapse">
+          <thead>
+            <tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1">
+              <th style="padding:7px 8px;text-align:left">Ngày test</th>
+              <th style="padding:7px 8px;text-align:left">Lot No</th>
+              <th style="padding:7px 8px;text-align:right">Pb (ppm)</th>
+              <th style="padding:7px 8px;text-align:right">Cd (ppm)</th>
+              <th style="padding:7px 8px;text-align:right">Hg (ppm)</th>
+              <th style="padding:7px 8px;text-align:right">Cr (ppm)</th>
+              <th style="padding:7px 8px;text-align:right">Br (ppm)</th>
+              <th style="padding:7px 8px;text-align:right">Cl (ppm)</th>
+              <th style="padding:7px 8px;text-align:center">Kết quả</th>
+              <th style="padding:7px 8px;text-align:center">Thao tác</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows}
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
+        <button type="button" class="toolbar-btn" onclick="document.getElementById('modal').close()">Đóng</button>
+      </div>
+    `;
+    openModal(`Kết quả đo XRF: ${item.code} (${ym})`, modalBody);
+    modal.querySelectorAll('[data-open]').forEach(b => {
+      b.onclick = () => {
+        modal.close();
+        goto('record/' + b.dataset.open);
+      };
+    });
+  } else if (status === 'CARRYOVER') {
+    const d = decl?.data || {};
+    const lot = d.inherited_lot || '—';
+    const testDate = d.inherited_test_date || '—';
+    const notes = d.notes || 'Không phát sinh lô mới trong tháng. Đang sử dụng tiếp lô cũ đã kiểm tra Đạt.';
+    const declaredBy = d.declared_by || '—';
+
+    const modalBody = `
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div style="font-weight:700;color:#1e40af;font-size:13.5px;display:flex;align-items:center;gap:6px">
+            <span>🔵 Tháng không phát sinh lô mới — Sử dụng tiếp lô cũ</span>
+          </div>
+          <span class="badge good" style="background:#dcfce7;color:#15803d;font-size:11px;padding:3px 8px">✓ Tuân thủ đạt chuẩn</span>
+        </div>
+        <div style="font-size:12px;color:#334155;line-height:1.6">
+          Mã vật liệu: <b>${esc(item.code)}</b> (${esc(item.name)})<br>
+          Kỳ kế hoạch: <b>Tháng ${month} / Năm ${ym.slice(0, 4)}</b> (${ym})<br>
+          Nhà cung cấp: <b>${esc(item.supplier)}</b> &nbsp;|&nbsp; Phân loại: <b>${esc(item.normalizedCategory)}</b>
+        </div>
+      </div>
+
+      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+        <h4 style="margin:0 0 10px;font-size:12px;color:#0f172a;text-transform:uppercase;letter-spacing:0.3px">Chi tiết lô hàng kế thừa</h4>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;font-size:12px;color:#334155">
+          <div>Mã Lot đang dùng: <b style="color:#0f172a">${esc(lot)}</b></div>
+          <div>Ngày kiểm tra gốc: <b style="color:#0f172a">${esc(testDate)}</b></div>
+          <div>Kết quả đo XRF gốc: <span style="color:#16a34a;font-weight:700">PASS (Đạt)</span></div>
+          <div>Người khai báo: <b>${esc(declaredBy)}</b></div>
+        </div>
+        <div style="margin-top:10px;padding-top:8px;border-top:1px dashed #e2e8f0;font-size:11.5px;color:#64748b">
+          <b>Ghi chú:</b> ${esc(notes)}
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+        ${decl?.id ? `<button type="button" id="modal-delete-decl-btn" style="height:32px;padding:0 12px;font-size:12px;color:#dc2626;background:#fff;border:1px solid #fca5a5;border-radius:6px;cursor:pointer;white-space:nowrap;font-weight:600">🗑️ Hủy khai báo này</button>` : '<div></div>'}
+        <button type="button" style="height:32px;padding:0 14px;font-size:12px;color:#334155;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer" onclick="document.getElementById('modal').close()">Đóng</button>
+      </div>
+    `;
+
+    modal.style.maxWidth = '640px';
+    modal.style.width = '640px';
+    openModal(`Khai báo kế thừa: ${item.code} (${ym})`, modalBody);
+    $('#modal-delete-decl-btn')?.addEventListener('click', () => {
+      deleteCarryOverDeclaration(decl.id, ym, decl.version);
+    });
+  } else if (status === 'EXEMPT') {
+    const d = decl?.data || {};
+    const notes = d.notes || 'Không phát sinh lô mới nhập kho hoặc tạm ngưng mã này.';
+    const declaredBy = d.declared_by || '—';
+
+    const modalBody = `
+      <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+        <div style="font-weight:700;color:#475569;font-size:13px;margin-bottom:4px">
+          ⚪ Tháng không nhập hàng / Miễn kiểm tra XRF
+        </div>
+        <p style="margin:0;font-size:12px;color:#334155;line-height:1.5">
+          Mã vật liệu <b>${esc(item.code)}</b> (${esc(item.name)}) được miễn kiểm tra trong <b>Tháng ${month}/${ym.slice(0, 4)}</b> do không phát sinh sản xuất hoặc nhập kho.<br>
+          Tháng này được loại khỏi mẫu số tính tỷ lệ tuân thủ (% Compliance).
+        </p>
+        <div style="margin-top:8px;font-size:11.5px;color:#64748b">
+          <b>Ghi chú:</b> ${esc(notes)}<br>
+          <b>Người khai báo:</b> ${esc(declaredBy)}
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+        ${decl?.id ? `<button type="button" id="modal-delete-decl-btn" style="height:32px;padding:0 12px;font-size:12px;color:#dc2626;background:#fff;border:1px solid #fca5a5;border-radius:6px;cursor:pointer;white-space:nowrap;font-weight:600">🗑️ Hủy khai báo này</button>` : '<div></div>'}
+        <button type="button" style="height:32px;padding:0 14px;font-size:12px;color:#334155;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer" onclick="document.getElementById('modal').close()">Đóng</button>
+      </div>
+    `;
+
+    modal.style.maxWidth = '640px';
+    modal.style.width = '640px';
+    openModal(`Miễn kiểm tra: ${item.code} (${ym})`, modalBody);
+    $('#modal-delete-decl-btn')?.addEventListener('click', () => {
+      deleteCarryOverDeclaration(decl.id, ym, decl.version);
+    });
+  } else {
+    // DUE, OVERDUE, SCHEDULED, NA
+    const isOverdue = status === 'OVERDUE';
+    const isDue = status === 'DUE';
+    const alertTitle = isOverdue ? 'Cảnh báo quá hạn kiểm tra XRF' : (isDue ? 'Nhắc nhở kiểm tra XRF đến hạn' : 'Kế hoạch kiểm tra XRF');
+    const alertColor = isOverdue ? '#b91c1c' : (isDue ? '#b45309' : '#1e40af');
+    const alertBg = isOverdue ? '#fee2e2' : (isDue ? '#fffbeb' : '#eff6ff');
+    const alertBorder = isOverdue ? '#fca5a5' : (isDue ? '#fde68a' : '#bfdbfe');
+
+    const modalBody = `
+      <div style="background:${alertBg};border:1px solid ${alertBorder};border-radius:8px;padding:12px 16px;margin-bottom:12px">
+        <div style="font-weight:700;color:${alertColor};font-size:13px;margin-bottom:4px">
+          ${isOverdue ? '⚠️ Chưa có kết quả đo XRF trong tháng quy định!' : (isDue ? '🟡 Tháng hiện tại đến hạn kiểm tra XRF định kỳ' : 'Kế hoạch kiểm tra XRF')}
+        </div>
+        <p style="margin:0;font-size:12px;color:#334155;line-height:1.5">
+          Mã vật liệu: <b>${esc(item.code)}</b> (${esc(item.name)}) &nbsp;|&nbsp; NCC: <b>${esc(item.supplier)}</b><br>
+          Kỳ kiểm tra: <b>Tháng ${month} / Năm ${ym.slice(0, 4)}</b> (${ym}) &nbsp;|&nbsp; Tần suất: <b>${esc(item.frequency)}</b>
+        </p>
+      </div>
+
+      <!-- Khung khai báo nghiệp vụ thông minh -->
+      <div style="background:#f8fafc;border:1px solid #dce3ec;border-radius:8px;padding:12px 14px;margin-bottom:14px">
+        <div style="font-weight:700;color:#1e293b;font-size:12.5px;margin-bottom:8px">
+          📋 Khai báo tình trạng nguyên vật liệu tháng ${month}/${ym.slice(0, 4)}:
+        </div>
+
+        <!-- Tùy chọn 1: Dùng tiếp lô cũ đã test Đạt -->
+        <div style="background:#fff;border:1.5px solid ${latestPassLot ? '#3b82f6' : '#cbd5e1'};border-radius:6px;padding:10px 12px;margin-bottom:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-weight:700;color:#1e40af;font-size:12px">💡 Phương án 1: Dùng tiếp lô trước đã kiểm tra Đạt (Lot Carry-over)</span>
+            ${latestPassLot ? '<span class="badge good" style="font-size:10px;padding:2px 6px">Đã tìm thấy Lot Đạt</span>' : ''}
+          </div>
+          <p style="font-size:11.5px;color:#475569;margin:0 0 8px;line-height:1.4">
+            ${latestPassLot
+              ? `Tìm thấy kết quả đo Pass gần nhất: <b>Lot ${esc(latestPassLot.lot)}</b> (Đo ngày: <b>${esc(latestPassLot.test_date)}</b>). Nếu tháng này không nhập lô mới, bạn có thể xác nhận tiếp tục sử dụng lô này.`
+              : `Nhập mã Lot cũ đang sử dụng trên chuyền để ghi nhận tính tuân thủ kế thừa.`}
+          </p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="text" id="carryover-lot-input" placeholder="Mã Lot sử dụng" value="${esc(latestPassLot ? latestPassLot.lot : '')}" style="height:32px;padding:4px 8px;font-size:12px;width:150px;border:1px solid #cbd5e1;border-radius:6px">
+            <input type="date" id="carryover-date-input" title="Ngày đo gốc của Lot" value="${esc(latestPassLot ? latestPassLot.test_date : '')}" style="height:32px;padding:4px 8px;font-size:12px;width:140px;border:1px solid #cbd5e1;border-radius:6px">
+            <button type="button" class="primary" id="confirm-carryover-btn" style="height:32px;padding:0 14px;font-size:12px;font-weight:600;background:#2563eb;color:#fff;border-radius:6px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center">
+              ✓ Xác nhận dùng Lot này (Pass)
+            </button>
+          </div>
+        </div>
+
+        <!-- Tùy chọn 2 & 3: Báo không nhập hàng hoặc Nhập số đo mới -->
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px">
+          <button type="button" id="confirm-exempt-btn" style="height:32px;padding:0 12px;font-size:12px;color:#475569;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;white-space:nowrap" title="Khai báo không phát sinh nhập lô mới hoặc tạm ngưng mã này">
+            ⚪ Không nhập hàng trong tháng (Miễn test)
+          </button>
+          <button type="button" class="primary" id="modal-enter-xrf-btn" style="height:32px;padding:0 14px;font-size:12px;font-weight:600;border-radius:6px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center">
+            ➕ Nhập số đo XRF mới (${item.testStage === 'XRF Test-OQC' ? 'OQC' : 'IQC'})
+          </button>
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end">
+        <button type="button" style="height:32px;padding:0 14px;font-size:12px;color:#334155;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer" onclick="document.getElementById('modal').close()">Đóng</button>
+      </div>
+    `;
+
+    modal.style.maxWidth = '640px';
+    modal.style.width = '640px';
+    openModal(alertTitle, modalBody);
+
+    $('#confirm-carryover-btn')?.addEventListener('click', () => {
+      const lotVal = ($('#carryover-lot-input')?.value || '').trim();
+      const dateVal = ($('#carryover-date-input')?.value || '').trim();
+      saveCarryOverDeclaration(item, ym, 'carry_over', lotVal, dateVal);
+    });
+
+    $('#confirm-exempt-btn')?.addEventListener('click', () => {
+      saveCarryOverDeclaration(item, ym, 'exemption', '', '');
+    });
+
+    $('#modal-enter-xrf-btn')?.addEventListener('click', () => {
+      modal.close();
+      const mod = item.testStage === 'XRF Test-OQC' ? 'xrf-oqc' : 'xrf-iqc';
+      recordForm(mod, null, {
+        material_code: item.code,
+        material_name: item.name,
+        category: item.rawCategory,
+        supplier: item.supplier,
+        project: item.project,
+        phase: item.phase,
+        test_date: `${ym}-01`
+      });
+    });
+  }
+}
+
+function exportXrfPlanExcel() {
+  const state = window.xrfPlanState;
+  const selYear = state.year || new Date().getFullYear();
+  const headers = ['STT', 'Part Code', 'Part Name', 'Nhà cung cấp', 'Dự án', 'Phân loại', 'Giai đoạn', 'Tần suất'];
+  for (let m = 1; m <= 12; m++) headers.push(`Tháng ${m}`);
+  headers.push('Tổng quan (Đã test / Yêu cầu)');
+  headers.push('Tỷ lệ tuân thủ (%)');
+
+  const rows = [headers];
+  const items = window.xrfPlanCurrentItems || [];
+  items.forEach((item, idx) => {
+    const row = [
+      idx + 1,
+      item.code,
+      item.name,
+      item.supplier,
+      item.project,
+      item.normalizedCategory,
+      item.phase,
+      item.frequency
+    ];
+    for (let m = 1; m <= 12; m++) {
+      const cell = item.months?.[m];
+      if (!cell) row.push('—');
+      else if (cell.status === 'TESTED') row.push(`Đã test (${cell.badgeLabel})`);
+      else if (cell.status === 'CARRYOVER') row.push(`Dùng lô cũ (${cell.decl?.data?.inherited_lot || 'Pass'})`);
+      else if (cell.status === 'EXEMPT') row.push('Miễn test');
+      else if (cell.status === 'DUE') row.push('Đến hạn');
+      else if (cell.status === 'OVERDUE') row.push('Quá hạn');
+      else if (cell.status === 'SCHEDULED') row.push('Kế hoạch');
+      else row.push('—');
+    }
+    const ov = item.overall || { compCount: 0, reqCount: 0, pct: 100 };
+    row.push(ov.reqCount === 0 && ov.compCount === 0 ? 'Miễn định kỳ' : `${ov.compCount}/${ov.reqCount}`);
+    row.push(`${ov.pct}%`);
+    rows.push(row);
+  });
+
+  const csvContent = '\uFEFF' + rows.map(r => r.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Ke_hoach_XRF_Nam_${selYear}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  notify(`Đã xuất file Kế hoạch XRF Năm ${selYear} thành công!`);
+}
+
+async function xrfPlanPage() {
+  const state = window.xrfPlanState;
+  
+  // Load data or use cached
+  if (!window.xrfPlanCache) {
+    const [matRes, iqcRes, oqcRes, planRes, bomRes] = await Promise.all([
+      api('/records?module=materials&size=2000'),
+      api('/records?module=xrf-iqc&size=2000'),
+      api('/records?module=xrf-oqc&size=2000'),
+      api('/records?module=xrf-plan&size=2000'),
+      api('/records?module=bom&size=2000')
+    ]);
+    window.xrfPlanCache = { matRes, iqcRes, oqcRes, planRes, bomRes };
+  }
+
+  const { matRes, iqcRes, oqcRes, planRes, bomRes } = window.xrfPlanCache;
+  const matItems = matRes?.items || [];
+  const iqcItems = iqcRes?.items || [];
+  const oqcItems = oqcRes?.items || [];
+  const planItems = planRes?.items || [];
+  const allBom = bomRes?.items || [];
+
+  // Index declarations from xrf-plan
+  const planDeclMap = {};
+  planItems.forEach(r => {
+    const d = r.data || {};
+    const code = (d.material_code || '').trim();
+    const ym = (d.year_month || '').trim();
+    if (code && ym) {
+      planDeclMap[`${code}_${ym}`] = r;
+    }
+  });
+
+  // Extract unique projects strictly from the "Project" column of BOM module (Quản lý & Cập nhật BOM)
+  const bomProjects = [...new Set(allBom.map(b => (b.data?.project || '').trim()).filter(Boolean))].sort();
+  const bomProjMats = {};
+  const matBomProjs = {};
+  allBom.forEach(b => {
+    const p = (b.data?.project || '').trim();
+    const mc = (b.data?.material_code || '').trim();
+    if (p && mc) {
+      if (!bomProjMats[p]) bomProjMats[p] = new Set();
+      bomProjMats[p].add(mc);
+      if (!matBomProjs[mc]) matBomProjs[mc] = new Set();
+      matBomProjs[mc].add(p);
+    }
+  });
+
+  const normalizeProject = (p) => {
+    if (!p) return '—';
+    const s = String(p).trim();
+    const clean = s.toLowerCase().replace(/[-_\s]+/g, '');
+    if (clean === 'comold' || clean === 'comolded') return 'Co-molded';
+    if (clean === 'sejump') return 'SE Jump';
+    for (const bp of bomProjects) {
+      if (bp.toLowerCase().replace(/[-_\s]+/g, '') === clean) return bp;
+    }
+    return s;
+  };
+
+  // Build indexed test maps
+  const iqcTestMap = {};
+  iqcItems.forEach(r => {
+    const d = r.data || {};
+    const code = (d.material_code || '').trim();
+    const date = (d.test_date || '').trim();
+    if (code && date.length >= 7) {
+      const key = `${code}_${date.slice(0, 7)}`;
+      if (!iqcTestMap[key]) iqcTestMap[key] = [];
+      iqcTestMap[key].push(r);
+    }
+  });
+
+  const oqcTestMap = {};
+  oqcItems.forEach(r => {
+    const d = r.data || {};
+    const code = (d.material_code || '').trim();
+    const date = (d.test_date || '').trim();
+    if (code && date.length >= 7) {
+      const key = `${code}_${date.slice(0, 7)}`;
+      if (!oqcTestMap[key]) oqcTestMap[key] = [];
+      oqcTestMap[key].push(r);
+    }
+  });
+
+  // Build index of valid Pass test records per material
+  const passTestsMap = {};
+  [...iqcItems, ...oqcItems].forEach(t => {
+    const d = t.data || {};
+    const code = (d.material_code || '').trim();
+    const res = String(d.result || '').toUpperCase();
+    if (code && res === 'PASS') {
+      if (!passTestsMap[code]) passTestsMap[code] = [];
+      passTestsMap[code].push({
+        id: t.id,
+        lot: d.lot || '—',
+        test_date: d.test_date || '',
+        result: d.result || 'Pass',
+        module: t.module
+      });
+    }
+  });
+  Object.values(passTestsMap).forEach(arr => {
+    arr.sort((a, b) => String(a.test_date).localeCompare(String(b.test_date)));
+  });
+
+  const getLatestPassLot = (code, ym) => {
+    const list = passTestsMap[code] || [];
+    if (!list.length) return null;
+    if (ym) {
+      const prior = list.filter(t => t.test_date && t.test_date.slice(0, 7) <= ym);
+      if (prior.length) return prior[prior.length - 1];
+    }
+    return list[list.length - 1];
+  };
+
+  // Build unified item list
+  const itemsMap = new Map();
+  matItems.forEach(m => {
+    const d = m.data || {};
+    const code = (d.material_code || '').trim();
+    if (!code) return;
+    const cat = (d.category || 'Direct Material').trim();
+    const catLower = cat.toLowerCase();
+    let normCat = 'Direct Material';
+    if (catLower.includes('indirect') || catLower.includes('pack')) normCat = 'Indirect Material';
+    else if (catLower.includes('finish') || catLower.includes('fg')) normCat = 'Finish Good';
+
+    const phase = (d.phase || 'MP').trim().toUpperCase();
+    const isNPI = phase.includes('NPI') || ['P1', 'P2', 'EVT', 'DVT', 'PVT'].some(p => phase.includes(p));
+
+    // Determine BOM project for this material from BOM module
+    const bProjs = matBomProjs[code] ? Array.from(matBomProjs[code]).sort() : [];
+    const projDisplay = bProjs.length > 0 ? bProjs.join(', ') : normalizeProject(d.project);
+
+    itemsMap.set(code, {
+      id: m.id,
+      code: code,
+      name: d.material_name || code,
+      supplier: d.supplier || '—',
+      project: projDisplay,
+      bomProjects: bProjs,
+      rawCategory: cat,
+      normalizedCategory: normCat,
+      phase: phase || 'MP',
+      isNPI: isNPI,
+      testStage: normCat === 'Finish Good' ? 'XRF Test-OQC' : 'XRF Test-IQC',
+      frequency: normCat === 'Direct Material'
+        ? (isNPI ? 'Once / stage' : 'Monthly')
+        : (normCat === 'Indirect Material'
+          ? (isNPI ? '1st lot only' : 'N/A')
+          : (isNPI ? 'Twice / stage' : 'Quarterly'))
+    });
+  });
+
+  oqcItems.forEach(r => {
+    const d = r.data || {};
+    const code = (d.material_code || '').trim();
+    if (code && !itemsMap.has(code)) {
+      const normProj = normalizeProject(d.project);
+      itemsMap.set(code, {
+        id: r.id,
+        code: code,
+        name: d.material_name || code,
+        supplier: d.supplier || 'In-house',
+        project: normProj,
+        bomProjects: [normProj],
+        rawCategory: 'Finish Good',
+        normalizedCategory: 'Finish Good',
+        phase: (d.phase || 'MP').trim().toUpperCase(),
+        isNPI: (d.phase || '').toUpperCase().includes('NPI'),
+        testStage: 'XRF Test-OQC',
+        frequency: 'Quarterly'
+      });
+    }
+  });
+
+  const allItems = Array.from(itemsMap.values());
+  // Strictly take project list from BOM module; fallback to allItems only if BOM is empty
+  const allProjects = bomProjects.length > 0
+    ? bomProjects
+    : [...new Set(allItems.map(i => i.project).filter(p => p && p !== '—'))].sort();
+
+  const now = new Date();
+  const curYear = now.getFullYear();
+  const curMonth = now.getMonth() + 1;
+  const curYM = `${curYear}-${String(curMonth).padStart(2, '0')}`;
+  const selYear = Number(state.year) || curYear;
+
+  window.xrfCellDetailStore = {};
+
+  let globalTestedCount = 0;
+  let globalDueCount = 0;
+  let globalOverdueCount = 0;
+  let globalRequiredToDateCount = 0;
+  let globalTestedToDateCount = 0;
+
+  allItems.forEach(item => {
+    item.months = {};
+    item.hasTestedInYear = false;
+    item.hasCarryOverInYear = false;
+    item.hasOverdueInYear = false;
+    item.hasDueThisMonth = false;
+
+    for (let m = 1; m <= 12; m++) {
+      const ym = `${selYear}-${String(m).padStart(2, '0')}`;
+      const isPast = ym < curYM;
+      const isCurrent = ym === curYM;
+      const isFuture = ym > curYM;
+
+      const testKey = `${item.code}_${ym}`;
+      const matchingTests = (item.normalizedCategory === 'Finish Good' ? oqcTestMap[testKey] : iqcTestMap[testKey]) || [];
+      const decl = planDeclMap[testKey];
+      const latestPassLot = getLatestPassLot(item.code, ym);
+
+      let status = 'NA';
+      let badgeLabel = '—';
+
+      if (matchingTests.length > 0) {
+        status = 'TESTED';
+        item.hasTestedInYear = true;
+        globalTestedCount++;
+        if (isPast || isCurrent) {
+          globalTestedToDateCount++;
+          globalRequiredToDateCount++;
+        }
+        const hasNG = matchingTests.some(t => {
+          const r = String(t.data?.result || '').toUpperCase();
+          return r === 'FAIL' || r === 'NG';
+        });
+        badgeLabel = hasNG ? 'NG' : (matchingTests.length > 1 ? `Pass (${matchingTests.length})` : 'Pass');
+      } else if (decl && decl.data?.plan_type === 'carry_over') {
+        status = 'CARRYOVER';
+        item.hasTestedInYear = true;
+        item.hasCarryOverInYear = true;
+        globalTestedCount++;
+        if (isPast || isCurrent) {
+          globalTestedToDateCount++;
+          globalRequiredToDateCount++;
+        }
+        badgeLabel = 'Dùng lô cũ';
+      } else if (decl && decl.data?.plan_type === 'exemption') {
+        status = 'EXEMPT';
+        badgeLabel = 'Miễn test';
+      } else {
+        let isRequired = false;
+        if (item.normalizedCategory === 'Direct Material') {
+          isRequired = !item.isNPI || m === 1;
+        } else if (item.normalizedCategory === 'Finish Good') {
+          isRequired = [3, 6, 9, 12].includes(m);
+        } else if (item.normalizedCategory === 'Indirect Material') {
+          isRequired = false;
+        }
+
+        if (isRequired) {
+          if (isPast) {
+            status = 'OVERDUE';
+            badgeLabel = 'Trễ hạn';
+            item.hasOverdueInYear = true;
+            globalOverdueCount++;
+            globalRequiredToDateCount++;
+          } else if (isCurrent) {
+            status = 'DUE';
+            badgeLabel = 'Đến hạn';
+            item.hasDueThisMonth = true;
+            globalDueCount++;
+            globalRequiredToDateCount++;
+          } else {
+            status = 'SCHEDULED';
+            badgeLabel = 'Kế hoạch';
+          }
+        }
+      }
+
+      const cellKey = `c_${item.code}_${ym}`.replace(/[^a-zA-Z0-9_]/g, '_');
+      window.xrfCellDetailStore[cellKey] = {
+        item: item,
+        ym: ym,
+        month: m,
+        status: status,
+        tests: matchingTests,
+        decl: decl,
+        latestPassLot: latestPassLot
+      };
+
+      item.months[m] = {
+        cellKey: cellKey,
+        ym: ym,
+        status: status,
+        badgeLabel: badgeLabel,
+        tests: matchingTests,
+        decl: decl,
+        latestPassLot: latestPassLot
+      };
+    }
+
+    // Calculate Overall full-year compliance for this item
+    let reqCount = 0;
+    let compCount = 0;
+
+    if (item.normalizedCategory === 'Direct Material') {
+      if (item.isNPI) {
+        reqCount = 1;
+        compCount = (item.months[1]?.status === 'TESTED' || item.months[1]?.status === 'CARRYOVER' || item.hasTestedInYear) ? 1 : 0;
+      } else {
+        reqCount = 12;
+        compCount = 0;
+        for (let m = 1; m <= 12; m++) {
+          const st = item.months[m]?.status;
+          if (st === 'TESTED' || st === 'CARRYOVER') {
+            compCount++;
+          } else if (st === 'EXEMPT') {
+            reqCount--;
+          }
+        }
+        reqCount = Math.max(0, reqCount);
+      }
+    } else if (item.normalizedCategory === 'Finish Good') {
+      if (item.isNPI) {
+        reqCount = 2;
+        let cnt = 0;
+        for (let m = 1; m <= 12; m++) {
+          const st = item.months[m]?.status;
+          if (st === 'TESTED' || st === 'CARRYOVER') cnt++;
+          else if (st === 'EXEMPT' && [3, 6, 9, 12].includes(m)) reqCount--;
+        }
+        compCount = Math.min(cnt, Math.max(1, reqCount));
+      } else {
+        reqCount = 4;
+        compCount = 0;
+        [3, 6, 9, 12].forEach(m => {
+          const st = item.months[m]?.status;
+          if (st === 'TESTED' || st === 'CARRYOVER') compCount++;
+          else if (st === 'EXEMPT') reqCount--;
+        });
+        reqCount = Math.max(0, reqCount);
+      }
+    } else if (item.normalizedCategory === 'Indirect Material') {
+      if (item.isNPI) {
+        reqCount = 1;
+        compCount = (item.hasTestedInYear || Object.values(item.months).some(x => x.status === 'CARRYOVER')) ? 1 : 0;
+      } else {
+        reqCount = item.hasTestedInYear ? 1 : 0;
+        compCount = item.hasTestedInYear ? 1 : 0;
+      }
+    }
+
+    const pct = reqCount > 0 ? Math.min(100, Math.round((compCount / reqCount) * 100)) : 100;
+    item.overall = {
+      reqCount,
+      compCount,
+      pct,
+      isOverdue: item.hasOverdueInYear
+    };
+  });
+
+  const complianceRate = globalRequiredToDateCount > 0
+    ? Math.min(100, Math.round((globalTestedToDateCount / globalRequiredToDateCount) * 100))
+    : 100;
+
+  // Filter items
+  let filtered = allItems;
+  const q = (state.q || '').trim().toLowerCase();
+  if (q) {
+    filtered = filtered.filter(i =>
+      i.code.toLowerCase().includes(q) ||
+      i.name.toLowerCase().includes(q) ||
+      i.supplier.toLowerCase().includes(q) ||
+      i.project.toLowerCase().includes(q)
+    );
+  }
+
+  if (state.project) {
+    filtered = filtered.filter(i => {
+      if (bomProjMats[state.project] && bomProjMats[state.project].has(i.code)) return true;
+      if (i.bomProjects && i.bomProjects.includes(state.project)) return true;
+      if (i.project === state.project || normalizeProject(i.project) === state.project) return true;
+      return false;
+    });
+  }
+
+  if (state.category) {
+    if (state.category === 'direct') {
+      filtered = filtered.filter(i => i.normalizedCategory === 'Direct Material');
+    } else if (state.category === 'indirect') {
+      filtered = filtered.filter(i => i.normalizedCategory === 'Indirect Material');
+    } else if (state.category === 'fg') {
+      filtered = filtered.filter(i => i.normalizedCategory === 'Finish Good');
+    }
+  }
+
+  if (state.status) {
+    if (state.status === 'tested') {
+      filtered = filtered.filter(i => i.hasTestedInYear);
+    } else if (state.status === 'carryover') {
+      filtered = filtered.filter(i => i.hasCarryOverInYear);
+    } else if (state.status === 'due') {
+      filtered = filtered.filter(i => i.hasDueThisMonth);
+    } else if (state.status === 'overdue') {
+      filtered = filtered.filter(i => i.hasOverdueInYear);
+    }
+  }
+
+  window.xrfPlanCurrentItems = filtered;
+
+  const matOptimal = (function() {
+    const vh = window.innerHeight || 800;
+    const count = Math.floor((vh - 295) / 30);
+    return Math.max(8, Math.min(30, count)) || 13;
+  })();
+
+  const pageSize = Number(state.size) || matOptimal;
+  const page = Number(state.page) || 1;
+  const total = filtered.length;
+  const pagedItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = Math.ceil(total / pageSize) || 1;
+
+  const paginationHtml = `
+    <div class="pagination" style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-top:1px solid #e2e8f0;font-size:11px;color:#64748b;background:#fff;flex-shrink:0">
+      <div>Hiển thị <b>${total ? (page - 1) * pageSize + 1 : 0}</b>–<b>${Math.min(page * pageSize, total)}</b> trong <b>${total}</b> mã hàng</div>
+      
+      <!-- Chú giải trạng thái (Status Legend) đặt gọn gàng, tinh tế tại Footer -->
+      <div style="display:flex;align-items:center;gap:12px;font-size:10.5px;color:#475569;user-select:none">
+        <span style="display:inline-flex;align-items:center;gap:4px" title="Đã có kết quả đo quang phổ XRF đạt chuẩn"><span style="width:14px;height:14px;border-radius:50%;background:#16a34a;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700">✓</span> Đạt chuẩn (Pass)</span>
+        <span style="display:inline-flex;align-items:center;gap:4px" title="Kế thừa kết quả đo của lô trước còn hạn tuân thủ"><span style="width:14px;height:14px;border-radius:50%;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700">⟳</span> Dùng lô cũ (Carry-over)</span>
+        <span style="display:inline-flex;align-items:center;gap:4px" title="Đã qua tháng quy định nhưng chưa có số đo"><span style="width:14px;height:14px;border-radius:50%;background:#ef4444;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:800">!</span> Quá hạn (Overdue)</span>
+        <span style="display:inline-flex;align-items:center;gap:4px" title="Đến kỳ lấy mẫu đo XRF trong tháng này"><span style="width:14px;height:14px;border-radius:50%;background:#f59e0b;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:8px">●</span> Đến hạn (Due)</span>
+        <span style="display:inline-flex;align-items:center;gap:4px" title="Kế hoạch định kỳ trong các tháng tới"><span style="width:12px;height:12px;border-radius:50%;border:1.5px dashed #93c5fd;background:#eff6ff;display:inline-block"></span> Kế hoạch</span>
+        <span style="display:inline-flex;align-items:center;gap:4px;color:#64748b" title="Tháng không nhập hàng hoặc không áp dụng kiểm tra"><span style="color:#94a3b8;font-weight:700;margin-right:2px">—</span> Miễn test (N/A)</span>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:6px">
+        <button type="button" class="toolbar-btn" id="xrf-plan-prev" ${page <= 1 ? 'disabled' : ''} style="padding:2px 8px;font-size:11px;height:26px">Trước</button>
+        <span>Trang <b>${page}</b> / <b>${totalPages}</b></span>
+        <button type="button" class="toolbar-btn" id="xrf-plan-next" ${page >= totalPages ? 'disabled' : ''} style="padding:2px 8px;font-size:11px;height:26px">Sau</button>
+      </div>
+    </div>
+  `;
+
+  // Unified KPI cards - Synchronized 5-card layout with other menus
+  const testedMaterialsCount = allItems.filter(i => i.hasTestedInYear).length;
+  const kpiCardsHtml = `
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;flex-shrink:0">
+      <div class="xrf-kpi-card" data-status-filter="" style="background:#fff;border:${!state.status?'2px solid #2563eb':'1px solid #e2e8f0'};border-radius:8px;padding:10px 14px;box-shadow:${!state.status?'0 0 0 2px rgba(37,99,235,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease">
+        <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase">Tổng số mã theo dõi</div>
+        <div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:2px;line-height:1.1">${allItems.length}</div>
+        <small style="color:#64748b;font-size:10.5px">Direct, Indirect &amp; Finish Good</small>
+      </div>
+      <div class="xrf-kpi-card" data-status-filter="tested" style="background:#f0fdf4;border:${state.status==='tested'?'2px solid #16a34a':'1px solid #bbf7d0'};border-radius:8px;padding:10px 14px;box-shadow:${state.status==='tested'?'0 0 0 2px rgba(22,163,74,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease">
+        <div style="font-size:11px;font-weight:600;color:#15803d;text-transform:uppercase">Đã đo XRF (${selYear})</div>
+        <div style="font-size:22px;font-weight:700;color:#16a34a;margin-top:2px;line-height:1.1">${testedMaterialsCount}</div>
+        <small style="color:#15803d;font-size:10.5px">${globalTestedCount} lượt kiểm tra đạt chuẩn</small>
+      </div>
+      <div class="xrf-kpi-card" data-status-filter="due" style="background:#fffbeb;border:${state.status==='due'?'2px solid #d97706':'1px solid #fde68a'};border-radius:8px;padding:10px 14px;box-shadow:${state.status==='due'?'0 0 0 2px rgba(217,119,6,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease">
+        <div style="font-size:11px;font-weight:600;color:#b45309;text-transform:uppercase">Đến hạn tháng ${curMonth}</div>
+        <div style="font-size:22px;font-weight:700;color:#d97706;margin-top:2px;line-height:1.1">${globalDueCount}</div>
+        <small style="color:#b45309;font-size:10.5px">Kỳ hạn kiểm tra tháng ${curMonth}/${selYear}</small>
+      </div>
+      <div class="xrf-kpi-card" style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.02);cursor:default">
+        <div style="font-size:11px;font-weight:600;color:#1e40af;text-transform:uppercase">Tỷ lệ tuân thủ (${selYear})</div>
+        <div style="font-size:22px;font-weight:700;color:#2563eb;margin-top:2px;line-height:1.1">${complianceRate}%</div>
+        <small style="color:#1e40af;font-size:10.5px">So với kế hoạch định kỳ cả năm</small>
+      </div>
+      <div class="xrf-kpi-card" data-status-filter="overdue" style="background:#fef2f2;border:${state.status==='overdue'?'2px solid #dc2626':'1px solid #fecaca'};border-radius:8px;padding:10px 14px;box-shadow:${state.status==='overdue'?'0 0 0 2px rgba(220,38,38,0.15), 0 2px 4px rgba(0,0,0,0.05)':'0 1px 2px rgba(0,0,0,0.02)'};cursor:pointer;transition:all .15s ease">
+        <div style="font-size:11px;font-weight:600;color:#b91c1c;text-transform:uppercase">Quá hạn chưa test</div>
+        <div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:2px;line-height:1.1">${globalOverdueCount}</div>
+        <small style="color:#b91c1c;font-size:10.5px">Cần nhắc nhở IQC/OQC đo bổ sung</small>
+      </div>
+    </div>
+  `;
+
+  // Professional Standard Toolbar matching Danh mục NVL
+  const toolbarHtml = `
+    <form class="toolbar" id="xrf-plan-toolbar" onsubmit="return false;" style="padding:8px 12px;gap:8px;align-items:center;flex-wrap:nowrap;margin:0;border-bottom:1px solid #e2e8f0;background:#fff;flex-shrink:0">
+      <input type="search" id="xrf-plan-search" placeholder="Tìm kiếm mã Part, tên NVL, nhà cung cấp, dự án…" value="${esc(state.q)}" aria-label="Tìm kiếm trong bảng" style="flex:1;min-width:140px;max-width:280px;height:32px;padding:5px 9px;font-size:11.5px">
+
+      <select id="xrf-plan-year" title="Chọn năm kế hoạch" style="height:32px;padding:4px 8px;font-size:11.5px;font-weight:600;color:#1e40af;max-width:105px">
+        <option value="2025" ${selYear===2025?'selected':''}>Năm 2025</option>
+        <option value="2026" ${selYear===2026?'selected':''}>Năm 2026</option>
+        <option value="2027" ${selYear===2027?'selected':''}>Năm 2027</option>
+      </select>
+
+      <select id="xrf-plan-project" title="Lọc theo dự án" style="height:32px;padding:4px 8px;font-size:11.5px;max-width:115px">
+        <option value="">Tất cả dự án (${allProjects.length})</option>
+        ${allProjects.map(p => `<option value="${esc(p)}" ${state.project===p?'selected':''}>Dự án: ${esc(p)}</option>`).join('')}
+      </select>
+
+      <select id="xrf-plan-category" title="Lọc theo phân loại vật liệu" style="height:32px;padding:4px 8px;font-size:11.5px;max-width:125px">
+        <option value="">Tất cả phân loại</option>
+        <option value="direct" ${state.category==='direct'?'selected':''}>Direct Material</option>
+        <option value="indirect" ${state.category==='indirect'?'selected':''}>Indirect Material</option>
+        <option value="fg" ${state.category==='fg'?'selected':''}>Finish Good</option>
+      </select>
+
+      <select id="xrf-plan-status" title="Lọc theo trạng thái kiểm tra" style="height:32px;padding:4px 8px;font-size:11.5px;max-width:130px">
+        <option value="">Tất cả trạng thái</option>
+        <option value="tested" ${state.status==='tested'?'selected':''}>✓ Đã đo XRF</option>
+        <option value="carryover" ${state.status==='carryover'?'selected':''}>⟳ Dùng lô cũ (Carry-over)</option>
+        <option value="due" ${state.status==='due'?'selected':''}>⏰ Đến hạn kiểm tra</option>
+        <option value="overdue" ${state.status==='overdue'?'selected':''}>⚠️ Quá hạn chưa test</option>
+      </select>
+
+      <div class="toolbar-actions-group">
+        <button type="button" id="xrf-plan-reset" class="toolbar-btn" title="Xóa toàn bộ bộ lọc & làm mới" aria-label="Xóa bộ lọc" style="height:32px;width:32px;padding:0;display:flex;align-items:center;justify-content:center">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+      </div>
+
+      <div class="toolbar-actions-right" style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-shrink:0">
+        <div style="display:inline-flex;background:#f1f5f9;border:1px solid #e2e8f0;padding:2px;border-radius:6px;gap:2px">
+          <button type="button" id="tab-xrf-matrix-btn" style="padding:3px 10px;height:26px;font-size:11px;border:none;border-radius:4px;cursor:pointer;background:${state.tab==='matrix'?'#fff':'transparent'};color:${state.tab==='matrix'?'#0f172a':'#64748b'};font-weight:${state.tab==='matrix'?'700':'500'};box-shadow:${state.tab==='matrix'?'0 1px 2px rgba(0,0,0,0.08)':'none'}">📊 Ma trận</button>
+          <button type="button" id="tab-xrf-rules-btn" style="padding:3px 10px;height:26px;font-size:11px;border:none;border-radius:4px;cursor:pointer;background:${state.tab==='rules'?'#fff':'transparent'};color:${state.tab==='rules'?'#0f172a':'#64748b'};font-weight:${state.tab==='rules'?'700':'500'};box-shadow:${state.tab==='rules'?'0 1px 2px rgba(0,0,0,0.08)':'none'}">⚙️ Tiêu chuẩn</button>
+        </div>
+
+        <button type="button" id="xrf-plan-export-btn" class="toolbar-btn" title="Xuất danh sách ra file Excel" aria-label="Xuất file Excel" style="height:32px;width:32px;padding:0;display:flex;align-items:center;justify-content:center">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </button>
+
+        ${can('xrf-plan','Create') ? `
+          <button type="button" id="xrf-plan-add-btn" class="primary toolbar-btn" title="Thêm kế hoạch kiểm tra đột xuất" aria-label="Thêm kế hoạch" style="height:32px;width:32px;padding:0;display:flex;align-items:center;justify-content:center">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+        ` : ''}
+      </div>
+    </form>
+  `;
+
+  // Render Table Rows with Status Indicator Dots & Overall Column
+  const rowsHtml = pagedItems.length ? pagedItems.map((item, idx) => {
+    const stt = (page - 1) * pageSize + idx + 1;
+    let catBadge = '';
+    if (item.normalizedCategory === 'Direct Material') {
+      catBadge = '<span class="badge info" style="background:#eff6ff;color:#1d4ed8;font-size:9.5px;padding:1px 4px;font-weight:600">Direct</span>';
+    } else if (item.normalizedCategory === 'Indirect Material') {
+      catBadge = '<span class="badge" style="background:#f1f5f9;color:#475569;font-size:9.5px;padding:1px 4px;font-weight:600">Indirect</span>';
+    } else {
+      catBadge = '<span class="badge good" style="background:#dcfce7;color:#15803d;font-size:9.5px;padding:1px 4px;font-weight:600">Finish Good</span>';
+    }
+
+    const monthCells = Array.from({length: 12}, (_, i) => i + 1).map(m => {
+      const cell = item.months[m];
+      const isCur = selYear === curYear && m === curMonth;
+      const cellBg = isCur ? 'background:rgba(254,243,199,0.3);' : '';
+
+      if (cell.status === 'TESTED') {
+        const isNG = cell.badgeLabel === 'NG';
+        const testCount = cell.tests.length;
+        const testDates = cell.tests.map(t => t.data?.test_date || '').filter(Boolean).join(', ');
+        const testLots = cell.tests.map(t => t.data?.lot || '').filter(Boolean).join(', ');
+        const tooltip = `ĐÃ ĐO ĐẠT CHUẨN (${cell.badgeLabel})\n• Tháng: T${m}/${selYear}\n• Lượt test: ${testCount}\n• Ngày test: ${testDates || '—'}\n• Lot: ${testLots || '—'}\n👉 Bấm để xem chi tiết phổ đo XRF`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><button type="button" class="xrf-matrix-cell xrf-dot-btn ${isNG ? 'dot-ng' : 'dot-pass'}" data-cell-key="${cell.cellKey}" title="${esc(tooltip)}">${isNG ? '✕' : (testCount > 1 ? testCount : '✓')}</button></td>`;
+      } else if (cell.status === 'CARRYOVER') {
+        const decl = cell.decl?.data || {};
+        const tooltip = `KẾ THỪA LÔ CŨ (CARRY-OVER - PASS)\n• Tháng: T${m}/${selYear}\n• Dùng tiếp Lot: ${decl.inherited_lot || '—'}\n• Ngày test gốc: ${decl.inherited_test_date || '—'}\n• Người khai báo: ${decl.declared_by || '—'}\n• Ghi chú: ${decl.notes || '—'}\n👉 Bấm để xem hoặc hủy khai báo`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><button type="button" class="xrf-matrix-cell xrf-dot-btn dot-carryover" data-cell-key="${cell.cellKey}" title="${esc(tooltip)}">⟳</button></td>`;
+      } else if (cell.status === 'EXEMPT') {
+        const decl = cell.decl?.data || {};
+        const tooltip = `MIỄN TEST THÁNG T${m}/${selYear}\n• Lý do: Không có lô hàng mới về trong tháng\n• Người khai báo: ${decl.declared_by || '—'}\n• Ghi chú: ${decl.notes || '—'}\n👉 Bấm để xem hoặc hủy khai báo`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><button type="button" class="xrf-matrix-cell xrf-dot-btn dot-exempt" data-cell-key="${cell.cellKey}" title="${esc(tooltip)}">—</button></td>`;
+      } else if (cell.status === 'DUE') {
+        const tooltip = `ĐẾN HẠN THÁNG NÀY!\n• Kỳ kiểm tra: T${m}/${selYear}\n• Tần suất: ${item.frequency}\n• Công đoạn: ${item.testStage}\n👉 Bấm để khai báo dùng lô cũ hoặc nhập số đo XRF`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><button type="button" class="xrf-matrix-cell xrf-dot-btn dot-due" data-cell-key="${cell.cellKey}" title="${esc(tooltip)}">●</button></td>`;
+      } else if (cell.status === 'OVERDUE') {
+        const tooltip = `QUÁ HẠN KIỂM TRA!\n• Kỳ quy định: T${m}/${selYear}\n• Tần suất: ${item.frequency}\n• Công đoạn: ${item.testStage}\n👉 Bấm để khai báo dùng lô cũ hoặc nhập số đo XRF`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><button type="button" class="xrf-matrix-cell xrf-dot-btn dot-overdue" data-cell-key="${cell.cellKey}" title="${esc(tooltip)}">!</button></td>`;
+      } else if (cell.status === 'SCHEDULED') {
+        const tooltip = `Kế hoạch định kỳ: Tháng ${m}/${selYear}\n• Tần suất: ${item.frequency}\n• Trạng thái: Chưa đến kỳ lấy mẫu\n👉 Bấm để khai báo trước hoặc nhập số đo sớm`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><button type="button" class="xrf-matrix-cell xrf-dot-btn dot-plan" data-cell-key="${cell.cellKey}" title="${esc(tooltip)}"></button></td>`;
+      } else {
+        const tooltip = `Không yêu cầu kiểm tra trong tháng ${m}`;
+        return `<td class="xrf-month-td" style="text-align:center;padding:0;color:#cbd5e1;font-size:11px;vertical-align:middle;text-overflow:clip;overflow:visible;${cellBg}"><span title="${esc(tooltip)}" style="cursor:default">·</span></td>`;
+      }
+    }).join('');
+
+    // Overall Column Calculation
+    const ov = item.overall || { compCount: 0, reqCount: 0, pct: 100, isOverdue: false };
+    let ovColor = '#16a34a';
+    let ovBarBg = '#16a34a';
+    let ovStatusText = 'Tuân thủ đạt chuẩn';
+
+    if (ov.isOverdue) {
+      ovColor = '#dc2626';
+      ovBarBg = '#dc2626';
+      ovStatusText = 'Có tháng quá hạn chưa kiểm tra!';
+    } else if (ov.reqCount === 0) {
+      ovColor = '#64748b';
+      ovBarBg = '#cbd5e1';
+      ovStatusText = 'Miễn kiểm tra định kỳ (MP Indirect)';
+    } else if (ov.compCount >= ov.reqCount) {
+      ovColor = '#16a34a';
+      ovBarBg = '#16a34a';
+      ovStatusText = 'Đã hoàn thành 100% kế hoạch năm';
+    } else {
+      ovColor = '#2563eb';
+      ovBarBg = '#2563eb';
+      ovStatusText = 'Đang thực hiện theo tiến độ kế hoạch';
+    }
+
+    const overallTooltip = `TỔNG QUAN NĂM ${selYear}:\n• Đã kiểm tra: ${ov.compCount} / ${ov.reqCount} kỳ yêu cầu\n• Tỷ lệ hoàn thành: ${ov.pct}%\n• Đánh giá: ${ovStatusText}`;
+
+    return `<tr style="border-bottom:1px solid #f1f5f9;height:29px">
+      <td style="text-align:center;color:#64748b;font-weight:500;position:sticky;left:0;background:#fff;z-index:2;padding:2px 0;width:36px;overflow:visible">${stt}</td>
+      <td style="position:sticky;left:36px;background:#fff;z-index:2;padding:2px 4px"><button type="button" class="link-button" data-open="${item.id}" style="font-weight:700;color:#0f172a;font-size:11px;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.code)}</button></td>
+      <td title="${esc(item.name)}" style="max-width:135px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;position:sticky;left:141px;background:#fff;z-index:2;box-shadow:2px 0 4px -2px rgba(0,0,0,0.12);padding:2px 6px;font-size:11px;color:#334155">${esc(item.name)}</td>
+      <td title="${esc(item.supplier)}" style="max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#64748b;padding:2px 6px;font-size:10.5px">${esc(item.supplier)}</td>
+      <td style="text-align:center;padding:2px 2px">${catBadge}</td>
+      <td style="text-align:center;padding:2px 0;overflow:visible"><span style="font-size:9.5px;font-weight:600;color:#334155;background:#f1f5f9;padding:1px 4px;border-radius:3px">${esc(item.phase)}</span></td>
+      <td style="text-align:center;font-size:10px;color:#64748b;padding:2px 2px">${esc(item.frequency)}</td>
+      ${monthCells}
+      <td style="padding:2px 6px;vertical-align:middle;text-align:center" title="${esc(overallTooltip)}">
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:72px;max-width:88px;margin:0 auto">
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:10px;font-weight:750;line-height:1">
+            <span style="color:${ovColor}">${ov.reqCount === 0 && ov.compCount === 0 ? 'N/A' : `${ov.compCount}/${ov.reqCount}`}</span>
+            <span style="color:${ovColor};font-size:9.5px">${ov.pct}%</span>
+          </div>
+          <div style="width:100%;height:4px;background:#e2e8f0;border-radius:2px;overflow:hidden">
+            <div style="width:${ov.pct}%;height:100%;background:${ovBarBg};border-radius:2px"></div>
+          </div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="20" class="empty-state" style="text-align:center;padding:30px;color:#64748b">Không tìm thấy mã vật liệu phù hợp với bộ lọc.</td></tr>`;
+
+  // Matrix Table with Colgroup and Sticky Headers
+  const matrixTableHtml = `
+    <div class="table-scroll" style="flex:1 1 0;min-height:0;overflow:auto">
+      <table class="xrf-matrix-table" style="width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed">
+        <colgroup>
+          <col style="width:36px">
+          <col style="width:105px">
+          <col style="width:135px">
+          <col style="width:95px">
+          <col style="width:75px">
+          <col style="width:48px">
+          <col style="width:65px">
+          ${Array.from({length: 12}, () => '<col style="width:28px">').join('')}
+          <col style="width:95px">
+        </colgroup>
+        <thead>
+          <tr style="background:#f8fafc;border-bottom:2px solid #cbd5e1">
+            <th style="text-align:center;padding:6px 0;position:sticky;left:0;top:0;background:#f8fafc;z-index:4;width:36px">STT</th>
+            <th style="text-align:left;padding:6px 4px;position:sticky;left:36px;top:0;background:#f8fafc;z-index:4;width:105px">Mã Part</th>
+            <th style="text-align:left;padding:6px 6px;position:sticky;left:141px;top:0;background:#f8fafc;z-index:4;box-shadow:2px 0 4px -2px rgba(0,0,0,0.12);width:135px">Tên NVL / TP</th>
+            <th style="text-align:left;padding:6px 6px;position:sticky;top:0;background:#f8fafc;z-index:3">Nhà cung cấp</th>
+            <th style="text-align:center;padding:6px 2px;position:sticky;top:0;background:#f8fafc;z-index:3">Phân loại</th>
+            <th style="text-align:center;padding:6px 2px;position:sticky;top:0;background:#f8fafc;z-index:3">Phase</th>
+            <th style="text-align:center;padding:6px 2px;position:sticky;top:0;background:#f8fafc;z-index:3">Tần suất</th>
+            ${Array.from({length: 12}, (_, i) => i + 1).map(m => {
+              const isCur = selYear === curYear && m === curMonth;
+              return `<th style="text-align:center;padding:6px 1px;position:sticky;top:0;background:${isCur?'#eff6ff':'#f8fafc'};color:${isCur?'#1d4ed8':'#475569'};font-weight:750;z-index:3" title="${isCur ? `Tháng hiện tại (T${m}/${selYear})` : `Tháng ${m}`}">T${m}</th>`;
+            }).join('')}
+            <th style="text-align:center;padding:6px 4px;position:sticky;top:0;background:#f8fafc;z-index:3;color:#1e293b;font-weight:750" title="Tình trạng tuân thủ toàn năm ${selYear}">Tổng quan</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  return `
+    <div style="display:flex;flex-direction:column;flex:1 1 0;min-height:0;height:100%;overflow:hidden">
+      ${kpiCardsHtml}
+      <section class="card fill-card" style="display:flex;flex-direction:column;flex:1 1 0;min-height:0;overflow:hidden;margin-bottom:0">
+        ${toolbarHtml}
+        <div id="xrf-matrix-wrapper" style="display:${state.tab==='rules'?'none':'flex'};flex-direction:column;flex:1 1 0;min-height:0;overflow:hidden">
+          ${matrixTableHtml}
+          ${paginationHtml}
+        </div>
+        <div id="xrf-rules-wrapper" style="display:${state.tab==='rules'?'flex':'none'};flex-direction:column;flex:1 1 0;min-height:0;overflow-y:auto;padding:10px 14px">
+          ${renderXrfFrequencyRulesTable()}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function bindXrfPlanPage() {
+  content.querySelectorAll('.xrf-kpi-card[data-status-filter]').forEach(card => {
+    card.onclick = () => {
+      const st = card.dataset.statusFilter;
+      window.xrfPlanState.status = (window.xrfPlanState.status === st && st !== '') ? '' : st;
+      window.xrfPlanState.page = 1;
+      render();
+    };
+  });
+
+  $('#xrf-plan-year')?.addEventListener('change', e => {
+    window.xrfPlanState.year = Number(e.target.value);
+    window.xrfPlanState.page = 1;
+    render();
+  });
+
+  $('#xrf-plan-project')?.addEventListener('change', e => {
+    window.xrfPlanState.project = e.target.value;
+    window.xrfPlanState.page = 1;
+    render();
+  });
+
+  $('#xrf-plan-category')?.addEventListener('change', e => {
+    window.xrfPlanState.category = e.target.value;
+    window.xrfPlanState.page = 1;
+    render();
+  });
+
+  $('#xrf-plan-status')?.addEventListener('change', e => {
+    window.xrfPlanState.status = e.target.value;
+    window.xrfPlanState.page = 1;
+    render();
+  });
+
+  let searchTimer = null;
+  $('#xrf-plan-search')?.addEventListener('input', e => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      window.xrfPlanState.q = e.target.value;
+      window.xrfPlanState.page = 1;
+      render();
+    }, 300);
+  });
+
+  $('#xrf-plan-reset')?.addEventListener('click', () => {
+    window.xrfPlanCache = null;
+    window.xrfPlanState = {
+      year: new Date().getFullYear(),
+      tab: 'matrix',
+      project: '',
+      category: '',
+      status: '',
+      q: '',
+      page: 1,
+      size: 15
+    };
+    render();
+  });
+
+  // Instant tab switching without full render/reload
+  const matrixWrap = $('#xrf-matrix-wrapper');
+  const rulesWrap = $('#xrf-rules-wrapper');
+  const matrixBtn = $('#tab-xrf-matrix-btn');
+  const rulesBtn = $('#tab-xrf-rules-btn');
+
+  matrixBtn?.addEventListener('click', () => {
+    window.xrfPlanState.tab = 'matrix';
+    if (matrixWrap && rulesWrap) {
+      matrixWrap.style.display = 'flex';
+      rulesWrap.style.display = 'none';
+      matrixBtn.style.background = '#fff';
+      matrixBtn.style.color = '#0f172a';
+      matrixBtn.style.fontWeight = '700';
+      matrixBtn.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
+      rulesBtn.style.background = 'transparent';
+      rulesBtn.style.color = '#64748b';
+      rulesBtn.style.fontWeight = '500';
+      rulesBtn.style.boxShadow = 'none';
+    } else {
+      render();
+    }
+  });
+
+  rulesBtn?.addEventListener('click', () => {
+    window.xrfPlanState.tab = 'rules';
+    if (matrixWrap && rulesWrap) {
+      matrixWrap.style.display = 'none';
+      rulesWrap.style.display = 'flex';
+      rulesBtn.style.background = '#fff';
+      rulesBtn.style.color = '#0f172a';
+      rulesBtn.style.fontWeight = '700';
+      rulesBtn.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
+      matrixBtn.style.background = 'transparent';
+      matrixBtn.style.color = '#64748b';
+      matrixBtn.style.fontWeight = '500';
+      matrixBtn.style.boxShadow = 'none';
+    } else {
+      render();
+    }
+  });
+
+  $('#xrf-plan-prev')?.addEventListener('click', () => {
+    if (window.xrfPlanState.page > 1) {
+      window.xrfPlanState.page--;
+      render();
+    }
+  });
+  $('#xrf-plan-next')?.addEventListener('click', () => {
+    window.xrfPlanState.page++;
+    render();
+  });
+
+  $('#xrf-plan-export-btn')?.addEventListener('click', () => {
+    exportXrfPlanExcel();
+  });
+
+  $('#xrf-plan-add-btn')?.addEventListener('click', () => {
+    recordForm('xrf-plan');
+  });
+
+  content.querySelectorAll('.xrf-matrix-cell').forEach(btn => {
+    btn.onclick = () => {
+      const cellKey = btn.dataset.cellKey;
+      const cellInfo = window.xrfCellDetailStore?.[cellKey];
+      if (!cellInfo) return;
+      openXrfCellDetailModal(cellInfo);
+    };
+  });
+}
 
 let cachedTestTypes = null;
 async function getTestTypesList() {
@@ -1678,7 +3402,138 @@ function openAttachFileModal(reportId, reportNumber) {
   };
 }
 
-async function openMaterialEditModal(row, focusTest = null) {
+function openAttachMsdsModal(row) {
+  const code = row.data?.material_code || '';
+  const matName = row.data?.material_name || code;
+  const supplier = row.data?.supplier || '';
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const nextYear = new Date();
+  nextYear.setFullYear(nextYear.getFullYear() + 1);
+  const nextYearStr = nextYear.toISOString().slice(0, 10);
+
+  const related = row.related || [];
+  const documents = related.filter(r => r.module === 'documents');
+  const existingMsdsDoc = documents.find(r => (code && r.data?.material_code === code) && (r.data?.category === 'MSDS' || String(r.data?.document_no||'').startsWith('MSDS-') || String(r.data?.document_name||'').toLowerCase().includes('msds')));
+
+  const modalHtml = `
+    <form id="attach-msds-form" style="display:flex;flex-direction:column;gap:12px">
+      <div style="font-size:12px;color:#334155;line-height:1.5">
+        Đính kèm tệp Bảng chỉ dẫn an toàn hóa chất (MSDS / SDS) cho vật liệu: <b>${esc(code)}</b> — ${esc(matName)}
+      </div>
+      <div id="msds-drop-zone" style="border:2px dashed #3b82f6;border-radius:8px;padding:22px 16px;text-align:center;background:#eff6ff;cursor:pointer;transition:all .2s">
+        <div style="font-size:28px;margin-bottom:6px">📑</div>
+        <div style="font-weight:650;font-size:13px;color:#1e40af">Bấm để chọn tệp MSDS / SDS hoặc kéo thả vào đây</div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px">Định dạng hỗ trợ: PDF, Word (.docx), Excel (.xlsx), Ảnh (PNG, JPG) · Tối đa 10 MB</div>
+        <input type="file" id="quick-msds-file-input" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx,.doc,.txt" style="display:none">
+        <div id="quick-msds-selected-label" style="margin-top:8px;font-size:11.5px;font-weight:600;color:#059669"></div>
+      </div>
+      <div id="attach-msds-error" class="form-error"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">
+        <button type="button" data-close>Hủy</button>
+        <button type="submit" class="primary" id="save-quick-msds-btn" style="padding:6px 16px;font-weight:600">💾 Tải lên & Lưu tệp MSDS</button>
+      </div>
+    </form>
+  `;
+
+  openModal('📑 Đính kèm tệp MSDS / SDS', modalHtml);
+  modal.style.maxWidth = '540px';
+
+  const dropZone = modal.querySelector('#msds-drop-zone');
+  const fileInput = modal.querySelector('#quick-msds-file-input');
+  const lbl = modal.querySelector('#quick-msds-selected-label');
+
+  if (dropZone && fileInput) {
+    dropZone.onclick = (e) => {
+      if (e.target !== fileInput) fileInput.click();
+    };
+    dropZone.ondragover = (e) => {
+      e.preventDefault();
+      dropZone.style.background = '#dbeafe';
+      dropZone.style.borderColor = '#2563eb';
+    };
+    dropZone.ondragleave = () => {
+      dropZone.style.background = '#eff6ff';
+      dropZone.style.borderColor = '#3b82f6';
+    };
+    dropZone.ondrop = (e) => {
+      e.preventDefault();
+      dropZone.style.background = '#eff6ff';
+      dropZone.style.borderColor = '#3b82f6';
+      if (e.dataTransfer.files.length) {
+        fileInput.files = e.dataTransfer.files;
+        fileInput.dispatchEvent(new Event('change'));
+      }
+    };
+  }
+
+  if (fileInput) {
+    fileInput.onchange = () => {
+      if (fileInput.files[0]) {
+        const f = fileInput.files[0];
+        if (lbl) lbl.innerHTML = `<span style="color:#16a34a">✓ Đã chọn: <b>${esc(f.name)}</b> (${(f.size/1024).toFixed(1)} KB)</span>`;
+        if (dropZone) {
+          dropZone.style.background = '#f0fdf4';
+          dropZone.style.borderColor = '#22c55e';
+        }
+      }
+    };
+  }
+
+  const form = modal.querySelector('#attach-msds-form');
+  if (form) {
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      if (!fileInput.files[0]) {
+        $('#attach-msds-error').textContent = 'Vui lòng chọn 1 tệp MSDS (PDF, Word, Excel).';
+        return;
+      }
+      const saveBtn = $('#save-quick-msds-btn');
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Đang tải lên...';
+      }
+      try {
+        const msdsDocData = {
+          document_no: `MSDS-${code}`,
+          document_name: `MSDS - ${matName}`,
+          category: 'MSDS',
+          material_code: code,
+          owner: supplier || 'Supplier',
+          effective_date: todayStr,
+          review_date: nextYearStr,
+          tags: 'MSDS, SDS, Safety Data Sheet'
+        };
+        let msdsRecId = existingMsdsDoc ? existingMsdsDoc.id : null;
+        if (msdsRecId) {
+          await api('/records/' + msdsRecId, {
+            method: 'PUT',
+            body: JSON.stringify({ module: 'documents', data: msdsDocData, version: existingMsdsDoc.version })
+          });
+        } else {
+          const createdDoc = await api('/records', {
+            method: 'POST',
+            body: JSON.stringify({ module: 'documents', data: msdsDocData })
+          });
+          msdsRecId = createdDoc.id;
+        }
+        const mBody = new FormData();
+        mBody.append('file', fileInput.files[0]);
+        await api('/records/' + msdsRecId + '/evidence', { method: 'POST', body: mBody });
+        modal.close();
+        notify('Đã tải lên tệp MSDS / SDS thành công.');
+        render();
+      } catch(err) {
+        $('#attach-msds-error').textContent = err.message;
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Tải lên & Lưu tệp MSDS';
+        }
+      }
+    };
+  }
+}
+
+async function openMaterialEditModal(row, focusTest = null, focusSection = null) {
   if (!row) row = { data: { usage_status: 'Đang sử dụng', required_tests: '' } };
   if (!row.data) row.data = {};
   if (row.id && (!row.related || !row.files)) {
@@ -1693,10 +3548,18 @@ async function openMaterialEditModal(row, focusTest = null) {
 
   const related = row.related || [];
   const existingReports = related.filter(r => r.module === 'reports');
+  const existingFmd = related.filter(r => r.module === 'fmd');
   const declarations = related.filter(r => ['declarations', 'material-declarations'].includes(r.module));
   const existingDecl = declarations.find(r => (row.data.material_code && r.data.material_code === row.data.material_code) || (row.data.supplier && r.data.supplier === row.data.supplier));
   const hasExistingDeclFile = existingDecl?.files && existingDecl.files.length > 0;
   const existingDeclFile = hasExistingDeclFile ? existingDecl.files[0] : null;
+
+  const documents = related.filter(r => r.module === 'documents');
+  const existingMsdsDoc = documents.find(r => (row.data.material_code && r.data?.material_code === row.data.material_code) && (r.data?.category === 'MSDS' || String(r.data?.document_no||'').startsWith('MSDS-') || String(r.data?.document_name||'').toLowerCase().includes('msds')));
+  const hasExistingMsdsFile = !!(existingMsdsDoc?.files && existingMsdsDoc.files.length > 0);
+  const existingMsdsFile = hasExistingMsdsFile ? existingMsdsDoc.files[0] : (row.evidence || []).find(e => e.name.toLowerCase().includes('msds') || e.name.toLowerCase().includes('sds'));
+
+  const availableReportIds = [...new Set(existingReports.map(r => r.data?.report_id).filter(Boolean))];
 
   function findLatestReport(testType) {
     const matching = existingReports.filter(r => r.data.test_type === testType || String(r.data.test_type||'').toLowerCase() === testType.toLowerCase());
@@ -1780,6 +3643,41 @@ async function openMaterialEditModal(row, focusTest = null) {
     `;
   }
 
+  function renderFmdRow(f = null) {
+    const fd = f?.data || {};
+    const fmdId = f?.id || '';
+    const fmdVer = f?.version || '';
+    const flag = fd.flag || '';
+    return `
+      <tr class="fmd-substance-row" data-fmd-id="${fmdId}" data-fmd-version="${fmdVer}" style="border-bottom:1px solid #f1f5f9;transition:background .15s">
+        <td style="padding:6px 8px">
+          <input type="text" class="fmd-cas-input" value="${esc(fd.cas || '')}" placeholder="VD: 68037-87-6" style="margin:0;padding:4px 8px;font-size:11.5px;font-family:monospace;width:100%;box-sizing:border-box">
+        </td>
+        <td style="padding:6px 8px">
+          <input type="text" class="fmd-substance-input" value="${esc(fd.substance || '')}" placeholder="Tên hợp chất hóa học *" required style="margin:0;padding:4px 8px;font-size:11.5px;font-weight:600;width:100%;box-sizing:border-box">
+        </td>
+        <td style="padding:6px 8px">
+          <input type="text" class="fmd-comp-input" value="${esc(fd.composition || '')}" placeholder="VD: 0.27%, ≤ 9%" style="margin:0;padding:4px 8px;font-size:11.5px;font-weight:600;color:#2563eb;width:100%;box-sizing:border-box">
+        </td>
+        <td style="padding:6px 8px">
+          <select class="fmd-flag-select" style="margin:0;padding:4px 6px;font-size:11px;width:100%;box-sizing:border-box">
+            <option value="" ${!flag ? 'selected' : ''}>✓ An toàn</option>
+            <option value="SVHC" ${flag==='SVHC' ? 'selected' : ''}>⚠️ SVHC</option>
+            <option value="RoHS" ${flag==='RoHS' ? 'selected' : ''}>⚠️ Vượt ngưỡng RoHS</option>
+            <option value="Halogen" ${flag==='Halogen' ? 'selected' : ''}>⚠️ Halogen</option>
+            <option value="Cảnh báo" ${flag && !['SVHC','RoHS','Halogen'].includes(flag) ? 'selected' : ''}>⚠️ ${esc(flag || 'Cảnh báo')}</option>
+          </select>
+        </td>
+        <td style="padding:6px 8px">
+          <input type="text" class="fmd-report-input" list="fmd-rep-suggestions" value="${esc(fd.report_id || '')}" placeholder="Số báo cáo đối chiếu" style="margin:0;padding:4px 8px;font-size:11px;width:100%;box-sizing:border-box">
+        </td>
+        <td style="padding:6px 4px;text-align:center">
+          <button type="button" class="remove-fmd-row-btn link-button" style="color:#ef4444;font-size:13px;padding:2px 6px;cursor:pointer" title="Xóa chất này khỏi FMD">✕</button>
+        </td>
+      </tr>
+    `;
+  }
+
   const modalHtml = `
     <datalist id="lab-suggestions">
       <option value="SGS Vietnam LTD">
@@ -1789,13 +3687,9 @@ async function openMaterialEditModal(row, focusTest = null) {
       <option value="TÜV Rheinland">
       <option value="Intertek">
     </datalist>
-    <datalist id="cat-suggestions">
-      <option value="Raw material">
-      <option value="Part">
-      <option value="Packaging">
-      <option value="Chemical">
+    <datalist id="fmd-rep-suggestions">
+      ${availableReportIds.map(id => `<option value="${esc(id)}">`).join('')}
     </datalist>
-
     <div class="mat-edit-all-in-one" style="display:flex;flex-direction:column;gap:14px;max-height:76vh;overflow-y:auto;padding-right:4px">
       <!-- Card 1: Thông tin vật liệu -->
       <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px">
@@ -1813,7 +3707,16 @@ async function openMaterialEditModal(row, focusTest = null) {
           </label>
           <label style="margin:0;font-size:11px;color:#475569">
             Phân loại (Category)
-            <input type="text" id="edit-mat-category" list="cat-suggestions" value="${esc(row.data.category||'Raw material')}" style="margin-top:4px">
+            <select id="edit-mat-category" style="margin-top:4px">
+              <option value="Direct Material" ${['direct material','direct'].includes(String(row.data?.category||'').trim().toLowerCase())?'selected':''}>Direct Material (Vật liệu trực tiếp)</option>
+              <option value="Indirect Material" ${['indirect material','indirect'].includes(String(row.data?.category||'').trim().toLowerCase())?'selected':''}>Indirect Material (Vật liệu gián tiếp)</option>
+              <option value="Raw material" ${String(row.data?.category||'').trim().toLowerCase()==='raw material'?'selected':''}>Raw material (Nguyên vật liệu chính)</option>
+              <option value="Packing material" ${['packing material','packaging'].includes(String(row.data?.category||'').trim().toLowerCase())?'selected':''}>Packing material (Bao bì, đóng gói)</option>
+              <option value="Finish Good" ${['finish good','finished goods'].includes(String(row.data?.category||'').trim().toLowerCase())?'selected':''}>Finish Good (Thành phẩm)</option>
+              <option value="Part" ${String(row.data?.category||'').trim().toLowerCase()==='part'?'selected':''}>Part (Linh kiện phụ)</option>
+              <option value="Chemical" ${String(row.data?.category||'').trim().toLowerCase()==='chemical'?'selected':''}>Chemical (Hóa chất)</option>
+              ${row.data?.category && !['direct material','indirect material','raw material','packing material','finish good','finished goods','part','chemical','direct','indirect','packaging'].includes(String(row.data.category).trim().toLowerCase()) ? `<option value="${esc(row.data.category)}" selected>${esc(row.data.category)}</option>` : ''}
+            </select>
           </label>
           <label style="margin:0;font-size:11px;color:#475569">
             Nhà cung cấp
@@ -1896,11 +3799,99 @@ async function openMaterialEditModal(row, focusTest = null) {
         </div>
       </div>
 
+      <!-- Card 4: Tệp MSDS / SDS & Khai báo thành phần FMD -->
+      <div id="card-fmd-msds" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:14px 16px;transition:border-color .2s, box-shadow .2s">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <div>
+            <div style="font-size:13px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:6px">
+              <span>📋 Tệp MSDS / SDS & Khai báo thành phần FMD</span>
+            </div>
+            <p style="margin:2px 0 0;font-size:11px;color:#64748b">
+              Đính kèm tệp Bảng chỉ dẫn an toàn hóa chất (MSDS / SDS) từ Nhà cung cấp và khai báo danh mục hợp chất (tùy chọn).
+            </p>
+          </div>
+        </div>
+
+        <!-- Khối 1: Tệp MSDS / SDS (Safety Data Sheet) -->
+        <div style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:6px;padding:10px 14px;margin-bottom:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+            <div style="flex:1;min-width:240px">
+              <span style="font-weight:700;color:#0f172a;font-size:12px;display:flex;align-items:center;gap:6px">
+                📑 Tệp Bảng chỉ dẫn an toàn hóa chất (MSDS / SDS Document)
+              </span>
+              <div id="msds-file-status" style="margin-top:4px;font-size:11px;color:#64748b">
+                ${existingMsdsFile ? `
+                  <span style="color:#059669;font-weight:600">✓ Đã có file:</span> <a href="/api/evidence/${existingMsdsFile.id}" target="_blank" style="color:#2563eb;text-decoration:underline;font-weight:600">${esc(existingMsdsFile.name)}</a>
+                ` : `
+                  <span style="color:#d97706">⚠️ Chưa có tệp MSDS / SDS đính kèm cho vật liệu này</span>
+                `}
+              </div>
+              <p style="margin:4px 0 0;font-size:10.5px;color:#64748b;font-style:italic">
+                💡 Bạn chỉ cần tải lên file MSDS / SDS gốc của Nhà cung cấp (PDF, Word, Excel). Không bắt buộc phải nhập chi tiết từng chất hóa học bên dưới nếu đã có file này.
+              </p>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              ${existingMsdsFile ? `
+                <button type="button" id="btn-remove-msds-file" class="link-button" style="font-size:11px;color:#ef4444;cursor:pointer" title="Gỡ file MSDS này">🗑️ Gỡ file</button>
+              ` : ''}
+              <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 12px;border-radius:5px;border:1px solid #3b82f6;background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:600;margin:0">
+                <input type="file" id="edit-mat-msds-file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx,.doc,.txt" style="display:none">
+                <span>${existingMsdsFile ? '🔄 Thay file MSDS khác' : '📎 Chọn file MSDS / SDS'}</span>
+              </label>
+              <span id="msds-selected-label" style="font-size:11px;font-weight:600;color:#059669"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Khối 2: Bảng kê hợp chất hóa học (FMD - Tùy chọn) -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">
+              <span>Chi tiết các hợp chất hóa học (FMD - Tùy chọn)</span>
+              <span id="fmd-substance-count-badge" class="badge" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;font-size:10.5px">
+                ${existingFmd.length} chất
+              </span>
+            </div>
+            <p style="margin:2px 0 0;font-size:10.5px;color:#94a3b8">
+              Kê khai số CAS, tên chất và hàm lượng % (chỉ cần nhập khi muốn bóc tách chi tiết từng chất).
+            </p>
+          </div>
+          <button type="button" id="btn-add-fmd-row" class="secondary" style="font-size:11px;padding:3px 10px;border-radius:4px;display:flex;align-items:center;gap:4px;cursor:pointer">
+            + Thêm chất FMD (tùy chọn)
+          </button>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;background:#fff">
+          <div class="table-scroll" style="max-height:240px;overflow-y:auto">
+            <table style="margin:0;font-size:11.5px;width:100%;border-collapse:collapse">
+              <thead style="position:sticky;top:0;background:#f8fafc;z-index:2;border-bottom:1px solid #cbd5e1">
+                <tr>
+                  <th style="padding:7px 8px;width:130px;font-weight:600;color:#334155;text-align:left">Số CAS (CAS No.)</th>
+                  <th style="padding:7px 8px;font-weight:600;color:#334155;text-align:left">Tên hợp chất (Substance) *</th>
+                  <th style="padding:7px 8px;width:110px;font-weight:600;color:#334155;text-align:left">Hàm lượng (%)</th>
+                  <th style="padding:7px 8px;width:135px;font-weight:600;color:#334155;text-align:left">Cảnh báo (Flag)</th>
+                  <th style="padding:7px 8px;width:180px;font-weight:600;color:#334155;text-align:left">Báo cáo đối chiếu</th>
+                  <th style="padding:7px 6px;width:40px;text-align:center"></th>
+                </tr>
+              </thead>
+              <tbody id="fmd-substances-tbody">
+                ${existingFmd.map(renderFmdRow).join('')}
+                <tr id="fmd-empty-row" style="${existingFmd.length ? 'display:none' : ''}">
+                  <td colspan="6" style="text-align:center;padding:16px;color:#94a3b8;font-size:11px">
+                    Chưa có hợp chất nào được nhập riêng lẻ. <i>(Nếu đã đính kèm file MSDS ở trên thì không cần nhập thêm các chất này).</i>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div id="mat-edit-all-error" class="form-error"></div>
     </div>
   `;
 
-  openModal('✏️ Chỉnh sửa hồ sơ vật liệu & Báo cáo kiểm nghiệm: ' + (row.data.material_code || label(row)), modalHtml, `
+  openModal('✏️ Chỉnh sửa hồ sơ vật liệu: ' + (row.data.material_code || label(row)), modalHtml, `
     <button data-close>Hủy</button>
     <button type="button" class="primary" id="save-mat-all-btn" style="padding:6px 18px;font-size:12.5px;font-weight:600">💾 Lưu tất cả thay đổi</button>
   `);
@@ -2037,6 +4028,95 @@ async function openMaterialEditModal(row, focusTest = null) {
     }, 150);
   }
 
+  const deletedFmdIds = new Set();
+
+  function updateFmdCount() {
+    const rows = modal.querySelectorAll('.fmd-substance-row');
+    const badge = modal.querySelector('#fmd-substance-count-badge');
+    if (badge) badge.textContent = `${rows.length} chất`;
+    const emptyRow = modal.querySelector('#fmd-empty-row');
+    if (emptyRow) {
+      emptyRow.style.display = rows.length === 0 ? '' : 'none';
+    }
+  }
+
+  function bindFmdRowEvents(rowEl) {
+    const delBtn = rowEl.querySelector('.remove-fmd-row-btn');
+    if (delBtn) {
+      delBtn.onclick = () => {
+        const fmdId = rowEl.dataset.fmdId;
+        const subName = rowEl.querySelector('.fmd-substance-input')?.value || 'chất này';
+        if (fmdId) {
+          if (!confirm(`Xác nhận xóa hợp chất "${subName}" khỏi khai báo FMD / MSDS?`)) return;
+          deletedFmdIds.add(fmdId);
+        }
+        rowEl.remove();
+        updateFmdCount();
+      };
+    }
+  }
+
+  modal.querySelectorAll('.fmd-substance-row').forEach(bindFmdRowEvents);
+
+  const addFmdRowBtn = modal.querySelector('#btn-add-fmd-row');
+  if (addFmdRowBtn) {
+    addFmdRowBtn.onclick = () => {
+      const tbody = modal.querySelector('#fmd-substances-tbody');
+      const temp = document.createElement('tbody');
+      temp.innerHTML = renderFmdRow(null);
+      const newRow = temp.firstElementChild;
+      const emptyRow = modal.querySelector('#fmd-empty-row');
+      if (emptyRow) emptyRow.style.display = 'none';
+      tbody.appendChild(newRow);
+      bindFmdRowEvents(newRow);
+      updateFmdCount();
+      newRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const inp = newRow.querySelector('.fmd-substance-input');
+      if (inp) inp.focus();
+    };
+  }
+
+  if (focusSection === 'fmd') {
+    setTimeout(() => {
+      const fmdCard = modal.querySelector('#card-fmd-msds');
+      if (fmdCard) {
+        fmdCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        fmdCard.style.borderColor = '#2563eb';
+        fmdCard.style.boxShadow = '0 0 0 2px #bfdbfe';
+      }
+    }, 200);
+  }
+
+  let removeExistingMsds = false;
+  const msdsFileInput = modal.querySelector('#edit-mat-msds-file');
+  const msdsFileLabel = modal.querySelector('#msds-selected-label');
+  const removeMsdsBtn = modal.querySelector('#btn-remove-msds-file');
+  const msdsStatus = modal.querySelector('#msds-file-status');
+
+  if (msdsFileInput) {
+    msdsFileInput.onchange = () => {
+      if (msdsFileInput.files[0]) {
+        const f = msdsFileInput.files[0];
+        removeExistingMsds = false;
+        if (msdsFileLabel) msdsFileLabel.textContent = `✓ Đã chọn: ${f.name} (${(f.size/1024).toFixed(1)} KB)`;
+        if (msdsStatus) msdsStatus.innerHTML = `<span style="color:#059669;font-weight:600">✓ Đã chọn file mới:</span> <b>${esc(f.name)}</b> (${(f.size/1024).toFixed(1)} KB)`;
+        if (removeMsdsBtn) removeMsdsBtn.style.display = '';
+      }
+    };
+  }
+
+  if (removeMsdsBtn) {
+    removeMsdsBtn.onclick = () => {
+      if (confirm('Xác nhận gỡ tệp MSDS / SDS này khỏi hồ sơ vật liệu?')) {
+        removeExistingMsds = true;
+        if (msdsFileInput) msdsFileInput.value = '';
+        if (msdsFileLabel) msdsFileLabel.textContent = '';
+        if (msdsStatus) msdsStatus.innerHTML = `<span style="color:#ef4444;font-weight:600">✕ Sẽ gỡ tệp MSDS khi lưu</span>`;
+        removeMsdsBtn.style.display = 'none';
+      }
+    };
+  }
+
   const saveBtn = modal.querySelector('#save-mat-all-btn');
   if (saveBtn) {
     saveBtn.onclick = async () => {
@@ -2114,6 +4194,45 @@ async function openMaterialEditModal(row, focusTest = null) {
           await api('/records/' + declRecId + '/evidence', { method: 'POST', body: dBody });
         }
 
+        // Save MSDS file if removed or selected
+        if (removeExistingMsds && existingMsdsDoc) {
+          try {
+            await api('/records/' + existingMsdsDoc.id + '?version=' + existingMsdsDoc.version, { method: 'DELETE' });
+          } catch(e) { console.warn('Could not archive old MSDS doc:', e); }
+        }
+
+        if (msdsFileInput && msdsFileInput.files && msdsFileInput.files[0]) {
+          const mFile = msdsFileInput.files[0];
+          const msdsDocData = {
+            document_no: `MSDS-${code}`,
+            document_name: `MSDS - ${updatedMatData.material_name || code}`,
+            category: 'MSDS',
+            material_code: code,
+            owner: updatedMatData.supplier || 'Supplier',
+            effective_date: todayStr,
+            review_date: nextYearStr,
+            tags: 'MSDS, SDS, Safety Data Sheet'
+          };
+
+          let msdsRecId = existingMsdsDoc && !removeExistingMsds ? existingMsdsDoc.id : null;
+          if (msdsRecId) {
+            await api('/records/' + msdsRecId, {
+              method: 'PUT',
+              body: JSON.stringify({ module: 'documents', data: msdsDocData, version: existingMsdsDoc.version })
+            });
+          } else {
+            const createdDoc = await api('/records', {
+              method: 'POST',
+              body: JSON.stringify({ module: 'documents', data: msdsDocData })
+            });
+            msdsRecId = createdDoc.id;
+          }
+
+          const mBody = new FormData();
+          mBody.append('file', mFile);
+          await api('/records/' + msdsRecId + '/evidence', { method: 'POST', body: mBody });
+        }
+
         const cards = modal.querySelectorAll('.mat-report-card');
         let repCreated = 0;
         let repUpdated = 0;
@@ -2175,10 +4294,72 @@ async function openMaterialEditModal(row, focusTest = null) {
           }
         }
 
+        // Save FMD & MSDS rows
+        const fmdRowEls = modal.querySelectorAll('.fmd-substance-row');
+        let fmdCreated = 0;
+        let fmdUpdated = 0;
+        let fmdDeleted = 0;
+
+        for (const fRow of fmdRowEls) {
+          const cas = fRow.querySelector('.fmd-cas-input')?.value.trim() || '';
+          const substance = fRow.querySelector('.fmd-substance-input')?.value.trim() || '';
+          const composition = fRow.querySelector('.fmd-comp-input')?.value.trim() || '';
+          const flag = fRow.querySelector('.fmd-flag-select')?.value.trim() || '';
+          const reportId = fRow.querySelector('.fmd-report-input')?.value.trim() || '';
+          const fmdId = fRow.dataset.fmdId;
+          const fmdVer = Number(fRow.dataset.fmdVersion) || 1;
+
+          if (!cas && !substance && !composition && !reportId) continue;
+
+          if (!substance) {
+            errBox.textContent = 'Vui lòng nhập Tên hợp chất cho tất cả các dòng trong bảng FMD & MSDS.';
+            saveBtn.disabled = false;
+            saveBtn.textContent = '💾 Lưu tất cả thay đổi';
+            return;
+          }
+
+          const fmdData = {
+            material_code: updatedMatData.material_code,
+            material_name: updatedMatData.material_name,
+            supplier: updatedMatData.supplier,
+            project: updatedMatData.project,
+            cas: cas,
+            substance: substance,
+            composition: composition,
+            flag: flag,
+            report_id: reportId,
+            result: flag ? 'WARNING' : 'PASS',
+            status: 'Completed'
+          };
+
+          if (fmdId) {
+            await api('/records/' + fmdId, {
+              method: 'PUT',
+              body: JSON.stringify({ module: 'fmd', data: fmdData, version: fmdVer })
+            });
+            fmdUpdated++;
+          } else {
+            await api('/records', {
+              method: 'POST',
+              body: JSON.stringify({ module: 'fmd', data: fmdData })
+            });
+            fmdCreated++;
+          }
+        }
+
+        for (const delId of deletedFmdIds) {
+          const ef = existingFmd.find(x => String(x.id) === String(delId));
+          if (ef) {
+            await api('/records/' + ef.id + '?version=' + ef.version, { method: 'DELETE' });
+            fmdDeleted++;
+          }
+        }
+
         modal.close();
         modal.style.maxWidth = '';
         modal.style.width = '';
-        notify(`Đã lưu thay đổi hồ sơ vật liệu thành công! ${repCreated ? `(+${repCreated} báo cáo mới) ` : ''}${repUpdated ? `(${repUpdated} báo cáo đã cập nhật)` : ''}`);
+        const fmdSummary = (fmdCreated || fmdUpdated || fmdDeleted) ? ` [FMD: ${fmdCreated ? `+${fmdCreated} chất, ` : ''}${fmdUpdated ? `${fmdUpdated} cập nhật, ` : ''}${fmdDeleted ? `-${fmdDeleted} xóa` : ''}]` : '';
+        notify(`Đã lưu thay đổi hồ sơ vật liệu thành công! ${repCreated ? `(+${repCreated} báo cáo mới) ` : ''}${repUpdated ? `(${repUpdated} báo cáo đã cập nhật)` : ''}${fmdSummary}`);
         render();
       } catch(err) {
         errBox.textContent = err.message;
@@ -2198,7 +4379,7 @@ function detailPage(row){
   const config=catalog.modules[row.module];
   const d=row.data;
   let xrfLinkHtml = '';
-  if (row.module === 'xrf-iqc' || row.module === 'xrf-oqc') {
+  if (row.module === 'xrf-iqc') {
     xrfLinkHtml = '<div id="xrf-link-info" style="margin-bottom:15px;padding:12px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:13px;display:flex;align-items:center;gap:8px;"><span class="spinner" style="width:16px;height:16px;border-width:2px;"></span> Đang kiểm tra liên kết danh mục NVL...</div>';
   }
   let materialHistoryHtml = '';
@@ -2223,6 +4404,14 @@ function detailPage(row){
     const hasDeclFile = decl?.files && decl.files.length > 0;
     const declFile = hasDeclFile ? decl.files[0] : null;
     const declName = decl?.data?.declaration_no || (d.supplier ? `${d.supplier}_Declaration` : 'Declaration');
+
+    const documents = related.filter(r => r.module === 'documents');
+    const msdsDoc = documents.find(r => (d.material_code && r.data?.material_code === d.material_code) && (r.data?.category === 'MSDS' || String(r.data?.document_no||'').startsWith('MSDS-') || String(r.data?.document_name||'').toLowerCase().includes('msds')));
+    const msdsDocFile = msdsDoc?.files && msdsDoc.files.length > 0 ? msdsDoc.files[0] : null;
+    const matMsdsEvidence = (row.evidence || []).find(e => e.name.toLowerCase().includes('msds') || e.name.toLowerCase().includes('sds'));
+    const msdsFile = msdsDocFile || matMsdsEvidence;
+    const hasMsds = !!msdsFile;
+    const msdsFileName = msdsFile ? msdsFile.name : (d.msds_file_name || 'Tệp MSDS / SDS');
 
     let reqValid = 0;
     const activeReports = [];
@@ -2382,7 +4571,10 @@ function detailPage(row){
         </tr>`;
       }).join('');
     } else {
-      fmdRowsHtml = `<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Chưa có dữ liệu khai báo thành phần FMD & MSDS cho vật liệu này.</td></tr>`;
+      fmdRowsHtml = `<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">
+        ${hasMsds ? 'Hồ sơ an toàn hóa chất đã được lưu trữ qua tệp MSDS / SDS đính kèm ở trên. (Không bắt buộc phải nhập chi tiết từng chất hóa học).' : 'Chưa có dữ liệu khai báo thành phần FMD & MSDS cho vật liệu này.'}
+        ${can('materials','Edit')||can('documents','Create')?`<div style="margin-top:6px"><button type="button" class="link-button" id="empty-add-fmd-btn" style="color:#2563eb;font-size:11.5px;font-weight:600;cursor:pointer">✏️ Bấm vào 'Chỉnh sửa' để tải file MSDS hoặc khai báo FMD →</button></div>`:''}
+      </td></tr>`;
     }
 
     const historyHtml = `<section class="card detail-compact-card" style="margin-bottom:8px"><div class="card-header" style="padding:6px 14px"><h3 style="font-size:12px;margin:0">Evidence & phiên bản file (${row.evidence?.length||0})</h3>${can(row.module,'Upload')?'<label style="margin:0"><input type="file" id="evidence-file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx,.txt" hidden><button id="upload-evidence" style="padding:2px 8px;font-size:11px">↑ Đính kèm file</button></label>':''}</div>${row.evidence.length?`<div class="table-scroll"><table><thead><tr><th>File</th><th>Người upload</th><th>Ngày</th><th>Dung lượng</th><th></th></tr></thead><tbody>${row.evidence.map(e=>`<tr><td title="SHA256: ${e.checksum}">${esc(e.name)}</td><td>${esc(e.uploader)}</td><td>${dateText(e.created_at)}</td><td>${(e.size/1024).toFixed(1)} KB</td><td>${['application/pdf','image/png','image/jpeg'].includes(e.mime)?`<button class="link-button" data-preview="${e.id}">Preview</button> · `:''}<a href="/api/evidence/${e.id}">Tải xuống</a></td></tr>`).join('')}</tbody></table></div>`:empty('Chưa có file evidence','Chưa có tệp đính kèm nào.')}</section><section class="card detail-compact-card" style="margin:0"><div class="card-header" style="padding:6px 14px"><h3 style="font-size:12px;margin:0">Lịch sử thay đổi & Audit trail (${row.history?.length||0})</h3></div><div class="card-body" style="padding:8px 14px">${row.history.map(h=>`<details style="margin-top:4px"><summary style="font-size:11px">${timeText(h.at)} · ${esc(h.actor)} · ${esc(h.action)}</summary><div class="form-grid" style="gap:8px;margin-top:4px"><pre style="padding:6px;font-size:10.5px">Trước\n${esc(JSON.stringify(h.before,null,2))}</pre><pre style="padding:6px;font-size:10.5px">Sau\n${esc(JSON.stringify(h.after,null,2))}</pre></div></details>`).join('')||'<p class="muted" style="margin:0;font-size:11px">Chưa có thay đổi sau khi nhập dữ liệu nguồn.</p>'}</div></section>`;
@@ -2428,7 +4620,15 @@ function detailPage(row){
             <div class="detail-item"><small>Dự án (Model)</small><div>${esc(d.project || '—')}</div></div>
             <div class="detail-item"><small>Tình trạng sử dụng</small><div>${esc(d.usage_status || 'Đang sử dụng')}</div></div>
             <div class="detail-item"><small>Kiểm nghiệm phòng Lab</small><div>${req_tests.length ? `<b>${reqValid} / ${req_tests.length}</b> Đạt chuẩn` : '<span style="color:#475569;font-weight:600">Không yêu cầu</span>'}</div></div>
-            <div class="detail-item"><small>Khai báo FMD / MSDS</small><div>${fmdRecords.length ? `<span class="badge good" style="font-size:10.5px">✓ Có FMD (${fmdRecords.length} chất)</span>` : `<span class="badge warn" style="font-size:10.5px">⚠️ Chưa có FMD / MSDS</span>`}</div></div>
+            <div class="detail-item"><small>Khai báo FMD / MSDS</small><div>${
+              hasMsds && fmdRecords.length
+                ? `<span class="badge good" style="font-size:10.5px">✓ Có MSDS (File + ${fmdRecords.length} chất)</span>`
+                : hasMsds
+                ? `<span class="badge good" style="font-size:10.5px">✓ Đã có file MSDS 📄</span>`
+                : fmdRecords.length
+                ? `<span class="badge good" style="font-size:10.5px">✓ Có FMD (${fmdRecords.length} chất)</span>`
+                : `<span class="badge warn" style="font-size:10.5px">⚠️ Chưa có MSDS / FMD</span>`
+            }</div></div>
             <div class="detail-item" style="grid-column: span 2"><small>Yêu cầu kiểm nghiệm</small><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               ${req_tests.map(t=>`<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:#eff6ff;color:#1e40af;font-size:10.5px;font-weight:600;border:1px solid #bfdbfe">${esc(t)}</span>`).join('') || '<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;font-size:10.5px">Không yêu cầu</span>'}
               <button type="button" id="quick-edit-tests-btn" style="padding:1px 6px;font-size:10px;border-radius:4px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;color:#2563eb;font-weight:500" title="Chọn loại báo cáo kiểm nghiệm từ Cài đặt">⚙️ Đổi</button>
@@ -2447,12 +4647,10 @@ function detailPage(row){
                 🔬 Báo cáo kiểm nghiệm (${testReports.length})
               </button>
               <button type="button" id="tab-btn-fmd" style="border:none;background:transparent;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;color:#64748b">
-                📋 Thành phần FMD & MSDS (${fmdRecords.length})
+                📋 MSDS & FMD (${hasMsds ? '1 file' + (fmdRecords.length ? ` · ${fmdRecords.length} chất` : '') : `${fmdRecords.length} chất`})
               </button>
             </div>
-            <div id="fmd-actions" style="display:none">
-              ${can('fmd','Create')?`<button class="primary" style="padding:2px 8px;font-size:10.5px" id="add-fmd-btn">+ Thêm FMD / MSDS</button>`:''}
-            </div>
+            <div id="fmd-actions" style="display:none"></div>
           </div>
 
           <!-- Bảng 1: Báo cáo kiểm nghiệm phòng Lab -->
@@ -2479,22 +4677,65 @@ function detailPage(row){
           </div>
 
           <!-- Bảng 2: Khai báo thành phần FMD & MSDS -->
-          <div id="panel-fmd" class="table-scroll" style="flex:1;min-height:0;overflow-y:auto;display:none">
-            <table>
-              <thead>
-                <tr>
-                  <th>CAS No.</th>
-                  <th>Tên hợp chất (Substance)</th>
-                  <th>Hàm lượng (%)</th>
-                  <th>Cảnh báo (Flag)</th>
-                  <th>Báo cáo đối chiếu</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                ${fmdRowsHtml}
-              </tbody>
-            </table>
+          <div id="panel-fmd" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;display:none">
+            <!-- Khối tệp tài liệu MSDS / SDS đính kèm -->
+            <div style="margin:8px 8px 6px;padding:10px 14px;background:#f8fafc;border:1px solid ${hasMsds ? '#bbf7d0' : '#fed7aa'};border-radius:6px;flex-shrink:0">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="font-size:20px">${hasMsds ? '📑' : '⚠️'}</span>
+                  <div>
+                    <div style="font-size:12px;font-weight:700;color:#0f172a">
+                      Tài liệu Bảng chỉ dẫn an toàn hóa chất (MSDS / SDS)
+                    </div>
+                    <div style="font-size:11px;color:#64748b;margin-top:2px">
+                      ${hasMsds ? `
+                        <span style="color:#059669;font-weight:600">✓ Đã đính kèm:</span>
+                        <a href="/api/evidence/${msdsFile.id}" target="_blank" style="color:#2563eb;font-weight:600;text-decoration:underline" title="Bấm để mở / tải về tệp MSDS">
+                          📄 ${esc(msdsFileName)}
+                        </a>
+                      ` : `
+                        <span style="color:#d97706">Chưa có tệp MSDS / SDS đính kèm cho vật liệu này.</span>
+                      `}
+                    </div>
+                  </div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  ${hasMsds ? `
+                    <a href="/api/evidence/${msdsFile.id}" target="_blank" class="badge good" style="text-decoration:none;font-size:11px;padding:3px 10px;font-weight:600" title="Tải về máy">📥 Tải MSDS</a>
+                    ${can('materials','Edit')||can('documents','Create') ? `
+                      <button type="button" class="link-button" id="btn-quick-msds-upload" style="font-size:11px;color:#2563eb;font-weight:600">🔄 Đổi file</button>
+                    ` : ''}
+                  ` : `
+                    ${can('materials','Edit')||can('documents','Create') ? `
+                      <button type="button" class="primary" id="btn-quick-msds-upload" style="font-size:11px;padding:3px 10px;border-radius:4px;cursor:pointer">📎 Tải lên file MSDS</button>
+                    ` : ''}
+                  `}
+                </div>
+              </div>
+            </div>
+
+            <!-- Bảng danh mục chất FMD -->
+            <div class="table-scroll" style="flex:1;min-height:0;overflow-y:auto">
+              <div style="padding:4px 10px;font-size:11px;font-weight:600;color:#64748b;background:#f1f5f9;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center">
+                <span>Danh mục hợp chất hóa học bóc tách (FMD - Tùy chọn)</span>
+                <span class="badge" style="font-size:10px">${fmdRecords.length} chất</span>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>CAS No.</th>
+                    <th>Tên hợp chất (Substance)</th>
+                    <th>Hàm lượng (%)</th>
+                    <th>Cảnh báo (Flag)</th>
+                    <th>Báo cáo đối chiếu</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${fmdRowsHtml}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
 
@@ -2642,6 +4883,8 @@ function bindCommon(root=content){
   });
 }
 function bindPage(id){bindCommon();
+if(id==='organization'){bindOrganization();return;}
+if(id==='xrf-plan'){bindXrfPlanPage();return;}
 if(id==='inspection-plans'){
   content.querySelectorAll('[data-plan-page]').forEach(b=>b.onclick=()=>{listState.page=Number(b.dataset.planPage);return render();});
   if($('#plan-prev')) $('#plan-prev').onclick=()=>{if(listState.page>1){listState.page--;render();}};
@@ -2665,13 +4908,16 @@ if(catalog.modules[id] || id==='bom' || id==='xrf' || id==='inspection-plans'){
     listState.size = val;
     if(module==='suppliers'||id==='suppliers') listState.supplierSize = val;
     if(module==='materials'||id==='materials') listState.materialSize = val;
+    if(module==='xrf-iqc'||module==='xrf-oqc'||id==='xrf-iqc'||id==='xrf-oqc'||id==='xrf') listState.xrfSize = val;
     if(module==='test-plan'||id==='test-plan'||id==='inspection-plans') listState.planSize = val;
     listState.page = 1;
     render();
   };
-  if($('#reset-filter')) $('#reset-filter').onclick=()=>{listState={page:1,q:'',status:'',project:'',category:'',start:'',end:'',sort:'updated_at',direction:'desc',size:listState.size||getOptimalPageSize()};render();};
+  if($('#reset-filter')) $('#reset-filter').onclick=()=>{listState={page:1,q:'',status:'',project:'',phase:'',category:'',start:'',end:'',sort:'updated_at',direction:'desc',size:listState.size||getOptimalPageSize()};render();};
   if($('#project-filter')) $('#project-filter').onchange=()=>{listState.project=$('#project-filter').value;listState.page=1;render();};
+  if($('#phase-filter')) $('#phase-filter').onchange=()=>{listState.phase=$('#phase-filter').value;listState.page=1;render();};
   if($('#category-filter')) $('#category-filter').onchange=()=>{listState.category=$('#category-filter').value;listState.page=1;render();};
+  if($('#status-filter')) $('#status-filter').onchange=()=>{listState.status=$('#status-filter').value;listState.page=1;render();};
   if($('#import-bom-btn')) $('#import-bom-btn').onclick=()=>confirmAction('Cập nhật dữ liệu BOM từ file Material report for SE-CM project.xlsx?',async()=>{try{const res=await api('/bom/import',{method:'POST'});notify(`Đã cập nhật BOM: +${res.bom_added} BOM, +${res.materials_added} NVL.`);render();}catch(err){notify(err.message);}});
   if($('#save-bom-btn')) $('#save-bom-btn').onclick=async()=>{try{try{await api('/bom/save',{method:'POST'});}catch(e){}notify('Đã lưu và xuất dữ liệu BOM thành công.');location.href='/api/export/bom';}catch(err){notify(err.message);}};
   if($('#delete-bom-btn')) $('#delete-bom-btn').onclick=()=>confirmAction('Bạn có chắc chắn muốn xóa TOÀN BỘ dữ liệu BOM? Danh mục NVL liên quan sẽ được tự động cập nhật theo.',async()=>{try{try{const res=await api('/bom',{method:'DELETE'});notify(`Đã xóa ${res.count} bản ghi BOM và cập nhật ${res.materials_count||0} NVL trong Danh mục.`);}catch(e){const allBom=await api('/records?module=bom&size=2000');const bomCodes=new Set(allBom.items.map(r=>r.data.material_code).filter(Boolean));for(const r of allBom.items){await api('/records/'+r.id+'?version='+r.version,{method:'DELETE'});}const allMats=await api('/records?module=materials&size=2000');let mCount=0;for(const m of allMats.items){if(bomCodes.has(m.data.material_code)){await api('/records/'+m.id+'?version='+m.version,{method:'DELETE'});mCount++;}}notify(`Đã xóa ${allBom.items.length} bản ghi BOM và đồng bộ ${mCount} NVL.`);}render();}catch(err){notify(err.message);}});
@@ -2698,8 +4944,16 @@ if(catalog.modules[id] || id==='bom' || id==='xrf' || id==='inspection-plans'){
     });
     $('#add-supplier-eval-btn')?.addEventListener('click',()=>openSupplierEvaluationModal());
   }
+  content.querySelectorAll('.edit-xrf-btn').forEach(b=>{
+    b.onclick=async()=>{
+      const rid=Number(b.dataset.recordId);
+      const mod=b.dataset.recordModule;
+      const row=await api('/records/'+rid);
+      recordForm(mod,row);
+    };
+  });
   if(id==='materials'||module==='materials'){
-    content.querySelectorAll('.edit-material-btn').forEach(b=>{
+  content.querySelectorAll('.edit-material-btn').forEach(b=>{
       b.onclick=async()=>{
         const mid=Number(b.dataset.materialId);
         const mRow=window.psMaterialsMap?.[mid];
@@ -2723,7 +4977,7 @@ if(id==='users'){
   if($('#next-page')) $('#next-page').onclick=()=>{listState.page=(listState.page||1)+1;render();};
   if($('#page-size-select')) $('#page-size-select').onchange=e=>{listState.size=Number(e.target.value);listState.page=1;render();};
 }
-if(id==='record'){const row=currentDetail;bindSupplyContext(row);$('#edit-record')?.addEventListener('click',()=>row.module==='materials'?openMaterialEditModal(row):row.module==='suppliers'?openSupplierEvaluationModal(row):recordForm(row.module,row));$('#edit-supplier-eval-btn')?.addEventListener('click',()=>openSupplierEvaluationModal(row));$('#archive-record')?.addEventListener('click',()=>confirmAction('Lưu trữ hồ sơ này? Hồ sơ sẽ rời danh sách nhưng audit history vẫn được giữ.',async()=>{await api('/records/'+row.id+'?version='+row.version,{method:'DELETE'});goto(row.module);}));$('#upload-evidence')?.addEventListener('click',()=>$('#evidence-file').click());$('#evidence-file')?.addEventListener('change',async e=>{if(!e.target.files[0])return;const body=new FormData();body.append('file',e.target.files[0]);try{await api('/records/'+row.id+'/evidence',{method:'POST',body});notify('Đã lưu evidence.');render();}catch(error){notify(error.message);}});document.querySelectorAll('[data-preview]').forEach(b=>b.onclick=()=>openModal('Preview evidence',`<iframe title="Nội dung evidence" class="preview-frame" src="/api/evidence/${b.dataset.preview}?inline=true"></iframe>`));$('#add-material-report')?.addEventListener('click',()=>{openModal('Thêm báo cáo / Tải file', `<div class="folder-grid"><button data-quick="reports" class="folder"><h3>Test Report</h3><p>RoHS, Halogen-Free...</p></button><button data-quick="documents" class="folder"><h3>Document</h3><p>SDS, MSDS, FMD...</p></button></div>`);modal.querySelectorAll('[data-quick]').forEach(b=>b.onclick=()=>{recordForm(b.dataset.quick,null,{material_code:row.data.material_code});});});$('#quick-edit-tests-btn')?.addEventListener('click',()=>openMaterialEditModal(row));$('#add-material-report-btn')?.addEventListener('click',()=>openMaterialEditModal(row));content.querySelectorAll('[data-upload-test]').forEach(b=>b.onclick=()=>openMaterialEditModal(row,b.dataset.uploadTest));content.querySelectorAll('[data-attach-report-file]').forEach(b=>b.onclick=()=>openAttachFileModal(b.dataset.attachReportFile,b.dataset.reportName));const tabTests=$('#tab-btn-tests'),tabFmd=$('#tab-btn-fmd'),panelTests=$('#panel-tests'),panelFmd=$('#panel-fmd'),actTests=$('#tests-actions'),actFmd=$('#fmd-actions');if(tabTests&&tabFmd){tabTests.onclick=()=>{tabTests.style.background='#fff';tabTests.style.color='#0f172a';tabTests.style.fontWeight='600';tabTests.style.boxShadow='0 1px 2px rgba(0,0,0,0.06)';tabFmd.style.background='transparent';tabFmd.style.color='#64748b';tabFmd.style.fontWeight='500';tabFmd.style.boxShadow='none';if(panelTests)panelTests.style.display='';if(panelFmd)panelFmd.style.display='none';if(actTests)actTests.style.display='';if(actFmd)actFmd.style.display='none';};tabFmd.onclick=()=>{tabFmd.style.background='#fff';tabFmd.style.color='#0f172a';tabFmd.style.fontWeight='600';tabFmd.style.boxShadow='0 1px 2px rgba(0,0,0,0.06)';tabTests.style.background='transparent';tabTests.style.color='#64748b';tabTests.style.fontWeight='500';tabTests.style.boxShadow='none';if(panelTests)panelTests.style.display='none';if(panelFmd)panelFmd.style.display='';if(actTests)actTests.style.display='none';if(actFmd)actFmd.style.display='';};}$('#add-fmd-btn')?.addEventListener('click',()=>recordForm('fmd',null,{material_code:row.data.material_code,material_name:row.data.material_name,supplier:row.data.supplier,project:row.data.project}));}
+if(id==='record'){const row=currentDetail;bindSupplyContext(row);$('#edit-record')?.addEventListener('click',()=>row.module==='materials'?openMaterialEditModal(row):row.module==='suppliers'?openSupplierEvaluationModal(row):recordForm(row.module,row));$('#edit-supplier-eval-btn')?.addEventListener('click',()=>openSupplierEvaluationModal(row));$('#archive-record')?.addEventListener('click',()=>confirmAction('Lưu trữ hồ sơ này? Hồ sơ sẽ rời danh sách nhưng audit history vẫn được giữ.',async()=>{await api('/records/'+row.id+'?version='+row.version,{method:'DELETE'});goto(row.module);}));$('#upload-evidence')?.addEventListener('click',()=>$('#evidence-file').click());$('#evidence-file')?.addEventListener('change',async e=>{if(!e.target.files[0])return;const body=new FormData();body.append('file',e.target.files[0]);try{await api('/records/'+row.id+'/evidence',{method:'POST',body});notify('Đã lưu evidence.');render();}catch(error){notify(error.message);}});document.querySelectorAll('[data-preview]').forEach(b=>b.onclick=()=>openModal('Preview evidence',`<iframe title="Nội dung evidence" class="preview-frame" src="/api/evidence/${b.dataset.preview}?inline=true"></iframe>`));$('#add-material-report')?.addEventListener('click',()=>{openModal('Thêm báo cáo / Tải file', `<div class="folder-grid"><button data-quick="reports" class="folder"><h3>Test Report</h3><p>RoHS, Halogen-Free...</p></button><button data-quick="documents" class="folder"><h3>Document</h3><p>SDS, MSDS, FMD...</p></button></div>`);modal.querySelectorAll('[data-quick]').forEach(b=>b.onclick=()=>{recordForm(b.dataset.quick,null,{material_code:row.data.material_code});});});$('#quick-edit-tests-btn')?.addEventListener('click',()=>openMaterialEditModal(row));$('#add-material-report-btn')?.addEventListener('click',()=>openMaterialEditModal(row));content.querySelectorAll('[data-upload-test]').forEach(b=>b.onclick=()=>openMaterialEditModal(row,b.dataset.uploadTest));content.querySelectorAll('[data-attach-report-file]').forEach(b=>b.onclick=()=>openAttachFileModal(b.dataset.attachReportFile,b.dataset.reportName));$('#btn-quick-msds-upload')?.addEventListener('click',()=>openAttachMsdsModal(row));const tabTests=$('#tab-btn-tests'),tabFmd=$('#tab-btn-fmd'),panelTests=$('#panel-tests'),panelFmd=$('#panel-fmd'),actTests=$('#tests-actions'),actFmd=$('#fmd-actions');if(tabTests&&tabFmd){tabTests.onclick=()=>{tabTests.style.background='#fff';tabTests.style.color='#0f172a';tabTests.style.fontWeight='600';tabTests.style.boxShadow='0 1px 2px rgba(0,0,0,0.06)';tabFmd.style.background='transparent';tabFmd.style.color='#64748b';tabFmd.style.fontWeight='500';tabFmd.style.boxShadow='none';if(panelTests)panelTests.style.display='';if(panelFmd)panelFmd.style.display='none';if(actTests)actTests.style.display='';if(actFmd)actFmd.style.display='none';};tabFmd.onclick=()=>{tabFmd.style.background='#fff';tabFmd.style.color='#0f172a';tabFmd.style.fontWeight='600';tabFmd.style.boxShadow='0 1px 2px rgba(0,0,0,0.06)';tabTests.style.background='transparent';tabTests.style.color='#64748b';tabTests.style.fontWeight='500';tabTests.style.boxShadow='none';if(panelTests)panelTests.style.display='none';if(panelFmd)panelFmd.style.display='';if(actTests)actTests.style.display='none';if(actFmd)actFmd.style.display='';};}$('#add-fmd-btn')?.addEventListener('click',()=>openMaterialEditModal(row,null,'fmd'));$('#empty-add-fmd-btn')?.addEventListener('click',()=>openMaterialEditModal(row,null,'fmd'));}
 if(id==='imports')$('#import-workbooks')?.addEventListener('click',()=>confirmAction('Kiểm tra ba workbook trong thư mục dự án và nhập file chưa có. File đã thay đổi sẽ được báo cần review, không ghi đè.',async()=>{const result=await api('/imports',{method:'POST'});notify(result.map(r=>r.file+': '+r.state).join(' · '));render();}));
 if(id==='xrf-trend'){$('#trend-element').onchange=async e=>{try{content.innerHTML=await trendPage(e.target.value,window.psTrend.stage||'');bindPage(id);}catch(error){notify(error.message);}};$('#coverage-filter').onchange=e=>{$('#coverage-table').innerHTML=coverageTable(window.psTrend.coverage.filter(r=>!e.target.value||r.status===e.target.value));bindCommon($('#coverage-table'));};}
 if(id==='users')document.querySelectorAll('[data-save-user]').forEach(b=>b.onclick=()=>{const uid=b.dataset.saveUser;const role=document.querySelector(`[data-user-role="${uid}"]`).value;const active=document.querySelector(`[data-user-active="${uid}"]`).checked;confirmAction('Lưu trạng thái và quyền truy cập tài khoản này?',async()=>{await api('/users/'+uid,{method:'PUT',body:JSON.stringify({role,active})});notify('Đã cập nhật tài khoản.');render();});});
@@ -2947,6 +5201,8 @@ async function xrfPage(tab) {
         pageHtml = `<section class="card"><div class="card-header"><div><h3>Tổng quan giám sát XRF</h3><small style="color:var(--muted)">Đo quang phổ huỳnh quang tia X kiểm soát hàm lượng kim loại nặng (Pb, Cd, Hg, Cr, Br, Cl)</small></div><div style="display:flex;gap:8px"><button data-route="xrf/iqc" class="primary">Xem dữ liệu IQC →</button><button data-route="xrf/trend">Xem biểu đồ Trend →</button></div></div><div class="card-body"><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px"><div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><span style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase">Vật liệu đã đo XRF</span><div style="font-size:24px;font-weight:700;color:#0f172a;margin:4px 0">${d.coverage.xrf} / ${d.coverage.total_materials}</div><small style="color:#059669">Đạt tỷ lệ ${d.coverage.total_materials ? Math.round(100*d.coverage.xrf/d.coverage.total_materials) : 0}% danh mục BOM</small></div><div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><span style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase">Ngưỡng kiểm soát RoHS</span><div style="font-size:24px;font-weight:700;color:#059669;margin:4px 0">100% Đạt</div><small style="color:#64748b">Không có mẫu vượt Control Limit</small></div><div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><span style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase">Quy trình áp dụng</span><div style="font-size:24px;font-weight:700;color:#0284c7;margin:4px 0">IQC & OQC</div><small style="color:#64748b">Đo đầu vào & thành phẩm xuất xưởng</small></div></div><p style="font-size:12px;color:var(--muted);margin:0">Chọn các tab phía trên (Kế hoạch, IQC, OQC, Change Control, Xu hướng) để xem bảng dữ liệu chi tiết và phân tích xu hướng.</p></div></section>`;
     } else if (tab === 'trend') {
         pageHtml = await trendPage('pb', '');
+    } else if (tab === 'iqc' || tab === 'oqc') {
+        pageHtml = await xrfDataListPage(tab === 'iqc' ? 'xrf-iqc' : 'xrf-oqc');
     } else {
         const modMap = {'plan': 'xrf-plan', 'iqc': 'xrf-iqc', 'oqc': 'xrf-oqc', 'change': 'change-control'};
         const module = modMap[tab];
@@ -3103,9 +5359,55 @@ async function xrfStandardPage(){
 }
 
 
-async function render() {
+const LIVE_REFRESH_MS=15000;
+let liveTimer,liveRendering=false,liveDirty=false,liveInteraction=0,livePath='',liveUpdatedAt=null;
+function liveBlocked(){
+  return liveDirty || !!document.querySelector('dialog[open]') ||
+    !!document.activeElement?.matches('input,textarea,select,[contenteditable="true"]');
+}
+function showLiveStatus(state='ready'){
+  const line=$('#topbar-updated');if(!line)return;
+  const labels={ready:'Trực tiếp',loading:'Đang cập nhật',paused:'Tạm dừng khi nhập liệu',error:'Mất kết nối · Thử lại',offline:'Ngoại tuyến'};
+  const time=liveUpdatedAt?liveUpdatedAt.toLocaleTimeString('vi-VN',{hour12:false}):'—';
+  line.hidden=false;
+  line.innerHTML=`<span class="live-state live-${state}">● ${labels[state]}</span><span> · Cập nhật lúc <time>${time}</time></span> <button id="page-refresh-btn" type="button" title="Lấy dữ liệu mới từ máy chủ; tự cập nhật mỗi 15 giây" ${state==='loading'?'disabled':''}>↻ Làm mới</button>`;
+  $('#page-refresh-btn').onclick=()=>refreshLivePage(true);
+}
+function scheduleLiveRefresh(){
+  clearTimeout(liveTimer);
+  liveTimer=setTimeout(()=>refreshLivePage(),LIVE_REFRESH_MS);
+}
+async function refreshLivePage(manual=false){
+  if(liveRendering){return;}
+  if(!manual&&document.visibilityState==='hidden'){scheduleLiveRefresh();return;}
+  if(navigator.onLine===false){showLiveStatus('offline');scheduleLiveRefresh();return;}
+  if(liveBlocked()){
+    showLiveStatus('paused');scheduleLiveRefresh();
+    if(manual)notify('Hoàn tất hoặc hủy phần đang nhập trước khi làm mới để tránh mất dữ liệu.');
+    return;
+  }
+  await render({liveRefresh:true});
+}
+content.addEventListener('input',()=>{liveDirty=true;liveInteraction++;showLiveStatus('paused');});
+content.addEventListener('change',()=>{liveDirty=true;liveInteraction++;});
+content.addEventListener('click',()=>{liveInteraction++;});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshLivePage();});
+window.addEventListener('online',()=>refreshLivePage());
+window.addEventListener('offline',()=>showLiveStatus('offline'));
+
+async function render(options={}) {
+  const background=options?.liveRefresh===true;
+  clearTimeout(liveTimer);
+  liveRendering=true;
+  const interaction=liveInteraction;
+  const scrollPositions=[...content.querySelectorAll('.table-scroll,.org-matrix,[data-material-panel]')].map(el=>[el.scrollLeft,el.scrollTop]);
+  const contentScroll=[content.scrollLeft,content.scrollTop];
+  const windowScroll=[window.scrollX,window.scrollY];
+  if(!background)liveDirty=false;
+  invalidateApiCache();
   const ticket=++requestId;
   const path=(location.hash || '#/dashboard').replace(/^#\//,'');
+  if(path!==livePath){livePath=path;liveUpdatedAt=null;}
   const [route,parameter]=path.split('/');
   if(currentModule!==route){
     currentModule=route;
@@ -3117,10 +5419,16 @@ async function render() {
     window.listState = listState;
   }
   content.classList.toggle('quality-dashboard-page',route==='dashboard');
-  if($('#topbar-updated'))$('#topbar-updated').hidden=true;
+  showLiveStatus('loading');
   nav(route==='group'?'group/'+parameter:route);
-  content.innerHTML='<div class="loading">Đang tải dữ liệu…</div>';
   let pageTitle=route==='dashboard'?'Product Safety Dashboard':title(route);
+  const heading=document.getElementById('topbar-title');
+  if(heading)heading.textContent=pageTitle;
+  const showLoadingTimer = setTimeout(() => {
+    if(ticket === requestId && !background) {
+      content.innerHTML='<div class="loading">Đang tải dữ liệu…</div>';
+    }
+  }, 100);
   try {
     let html;
     if(route==='xrf') {
@@ -3154,28 +5462,37 @@ async function render() {
     else if(route==='inspection-plans')html=await planningPage();
     else if(route==='xrf-standard')html=await xrfStandardPage();
     else if(route==='test-plan') html=await finishedGoodsTestPlanPage();
+    else if(route==='xrf-plan') html=await xrfPlanPage();
     else if(catalog.modules[route])html=await listPage(route);
     else html=empty('Không tìm thấy trang','Đường dẫn không hợp lệ. Chọn một mục trong menu.');
+    clearTimeout(showLoadingTimer);
     if(ticket!==requestId)return;
+    if(background&&(liveBlocked()||interaction!==liveInteraction)){
+      showLiveStatus('paused');return;
+    }
     content.innerHTML=html;
     const heading=document.getElementById('topbar-title');
     if(heading)heading.textContent=pageTitle;
-    if(route==='dashboard'&&$('#topbar-updated')){
-      const now = new Date();
-      const timeStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
-      $('#topbar-updated').innerHTML = `<span style="color:#059669;font-weight:600">● Trực tiếp</span> · Cập nhật lúc ${timeStr} <button id="dashboard-refresh-btn" type="button" title="Làm mới dữ liệu Dashboard" style="margin-left:6px;padding:1px 6px;font-size:11px;background:#fff;border:1px solid #cbd5e1;border-radius:4px;cursor:pointer;color:#334155;font-weight:500;box-shadow:0 1px 2px rgba(0,0,0,0.04)">🔄 Làm mới</button>`;
-      $('#topbar-updated').hidden = false;
-      $('#dashboard-refresh-btn')?.addEventListener('click', () => {
-        notify('Đang đồng bộ và làm mới dữ liệu Dashboard…');
-        render();
-      });
-    }
     if(route==='xrf-trend'&&parameter)$('#topbar-title').textContent=parameter+' Trend';
     bindPage(route);
+    liveDirty=false;
+    liveUpdatedAt=new Date();
+    showLiveStatus('ready');
+    if(background){
+      content.querySelectorAll('.table-scroll,.org-matrix,[data-material-panel]').forEach((el,i)=>{if(scrollPositions[i]){el.scrollLeft=scrollPositions[i][0];el.scrollTop=scrollPositions[i][1];}});
+      content.scrollLeft=contentScroll[0];content.scrollTop=contentScroll[1];
+      if(window.scrollX!==windowScroll[0]||window.scrollY!==windowScroll[1])window.scrollTo(...windowScroll);
+    }
   } catch(error) {
+    clearTimeout(showLoadingTimer);
     if(ticket!==requestId)return;
+    showLiveStatus(navigator.onLine===false?'offline':'error');
+    if(background)return;
     content.innerHTML=`<div class="alert error">${esc(error.message)}</div><button id="retry-page">Thử lại</button>`;
     $('#retry-page').onclick=render;
+  } finally {
+    clearTimeout(showLoadingTimer);
+    if(ticket===requestId){liveRendering=false;scheduleLiveRefresh();}
   }
 }
 
@@ -3190,7 +5507,8 @@ document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-status-filter]');
   if (btn) {
     e.preventDefault();
-    listState.status = btn.dataset.statusFilter || '';
+    const val = btn.dataset.statusFilter || '';
+    listState.status = (listState.status === val && val !== '') ? '' : val;
     listState.page = 1;
     render();
   }
@@ -3216,6 +5534,14 @@ window.addEventListener('hashchange', render);
     }
     toggleSidebar(localStorage.getItem('ps_sidebar_collapsed') === 'true' || innerWidth < 760);
     await render();
+    // Warm in-memory cache in background for instantaneous sub-10ms route navigation
+    setTimeout(() => {
+      api('/overview').catch(() => {});
+      api('/records?module=materials&size=2000').catch(() => {});
+      api('/records?module=xrf-iqc&size=2000').catch(() => {});
+      api('/records?module=xrf-oqc&size=2000').catch(() => {});
+      api('/records?module=xrf-plan&size=2000').catch(() => {});
+    }, 250);
   } catch(error) {
     console.error('Init error:', error);
     if(content) {
